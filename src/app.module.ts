@@ -7,6 +7,8 @@ import { LeadsModule } from './leads/leads.module';
 import { FinanceModule } from './finance/finance.module';
 import { CustomersModule } from './customers/customers.module';
 import { ReportsModule } from './reports/reports.module';
+import { DocumentsModule } from './documents/documents.module';
+import { PdfModule } from './pdf/pdf.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -22,6 +24,8 @@ import { HealthController } from './health/health.controller';
     FinanceModule,
     CustomersModule,
     ReportsModule,
+    DocumentsModule,
+    PdfModule,
   ],
   controllers: [HealthController],
 })
