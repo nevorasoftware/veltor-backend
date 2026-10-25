@@ -1,0 +1,731 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// ENUMS
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  SUPERADMIN
+  ADMIN
+  COMMERCIAL_AGENT
+  CREDIT_ANALYST
+  APPROVAL_OFFICER
+  CASHIER
+  COLLECTIONS_AGENT
+  AUDITOR
+  CUSTOMER
+}
+
+enum PersonType {
+  NATURAL
+  JURIDICAL
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  DIVORCED
+  WIDOWED
+  COHABITING
+}
+
+enum CustomerStatus {
+  PROSPECT
+  ACTIVE
+  BLOCKED
+  INACTIVE
+}
+
+enum DocumentCategory {
+  DUI_FRONT
+  DUI_BACK
+  DRIVER_LICENSE
+  NIT
+  TAX_RETURN
+  BANK_STATEMENT
+  AFP_STATEMENT
+  PAYSLIP
+  UTILITY_BILL
+  SALES_CONTRACT
+  PROMISSORY_NOTE
+  VEHICLE_TITLE
+  OTHER
+}
+
+enum DocumentStatus {
+  PENDING
+  RECEIVED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum VehicleTransmission {
+  AUTOMATIC
+  MANUAL
+}
+
+enum VehicleFuel {
+  GASOLINE
+  DIESEL
+  HYBRID
+  ELECTRIC
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  RESERVED
+  SOLD
+  MAINTENANCE
+  UNPUBLISHED
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  IN_EVALUATION
+  CONVERTED
+  DISCARDED
+}
+
+enum LeadSource {
+  CATALOG_REQUEST
+  SIMULATOR_LEAD
+  CALL_REQUEST
+  WHATSAPP
+  DIRECT
+}
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  DOCUMENTS_PENDING
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  FORMALIZED
+  CANCELLED
+}
+
+enum LoanStatus {
+  ACTIVE
+  PAID_OFF
+  RESTRUCTURED
+  DEFAULTED
+  CANCELLED
+}
+
+enum AmortizationMethod {
+  FRENCH
+  CONSTANT_PRINCIPAL
+}
+
+enum DayCountBasis {
+  D30_360
+  ACT_360
+  ACT_365
+}
+
+enum PaymentFrequency {
+  MONTHLY
+  BIWEEKLY
+  WEEKLY
+}
+
+enum InstallmentStatus {
+  PENDING
+  PARTIAL
+  PAID
+  OVERDUE
+  REPLACED
+  RESTRUCTURED
+  CANCELLED
+}
+
+enum PaymentKind {
+  INSTALLMENT
+  PRINCIPAL_PREPAYMENT
+  PAYOFF
+}
+
+enum PrepaymentPolicy {
+  REDUCE_TERM
+  REDUCE_INSTALLMENT
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  BANK_DEPOSIT
+  CHECK
+  OTHER
+}
+
+enum AllocationConcept {
+  LATE_INTEREST
+  INTEREST
+  PRINCIPAL
+  ACCRUED_INTEREST
+  PREPAYMENT_PRINCIPAL
+  SURPLUS
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  WHATSAPP
+  IN_APP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// -----------------------------------------------------------------------------
+// SEGURIDAD, USUARIOS Y ROLES (RBAC)
+// -----------------------------------------------------------------------------
+
+model User {
+  id               String       @id @default(uuid())
+  email            String       @unique
+  passwordHash     String
+  fullName         String
+  role             UserRole     @default(CUSTOMER)
+  phone            String?
+  isActive         Boolean      @default(true)
+  mustChangePass   Boolean      @default(false)
+  activationToken  String?      @unique
+  activationExpires DateTime?
+  resetToken       String?      @unique
+  resetExpires     DateTime?
+  lastLoginAt      DateTime?
+  customerId       String?      @unique
+  customer         Customer?    @relation(fields: [customerId], references: [id])
+
+  // Auditoría y relaciones
+  uploadedDocuments  CustomerDocument[]  @relation("DocUploader")
+  evaluatedApplications CreditEvaluation[] @relation("Evaluator")
+  approvedApplications  CreditApproval[]   @relation("Approver")
+  registeredPayments    PaymentTransaction[] @relation("PaymentRegistrar")
+  authorizedReversals   PaymentReversal[]    @relation("ReversalAuthorizer")
+  collectionActivities  CollectionActivity[] @relation("Collector")
+  auditLogs             AuditLog[]           @relation("UserAudits")
+
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@map("users")
+}
+
+// -----------------------------------------------------------------------------
+// CLIENTES Y EXPEDIENTES
+// -----------------------------------------------------------------------------
+
+model Customer {
+  id                 String           @id @default(uuid())
+  code               String           @unique // CLI-00001
+  personType         PersonType       @default(NATURAL)
+  fullName           String
+  dui                String?          @unique // Validado formato 00000000-0
+  nit                String?          @unique
+  birthDate          DateTime?
+  maritalStatus      MaritalStatus?
+  phone              String
+  email              String           @unique
+  address            String
+  municipality       String?
+  department         String?          @default("San Salvador")
+  economicActivity   String
+  employerName       String?
+  monthlyIncome      Decimal          @db.Decimal(12, 2)
+  declaredDebts      Decimal          @default(0) @db.Decimal(12, 2)
+  status             CustomerStatus   @default(PROSPECT)
+  internalNotes      String?          @db.Text
+
+  user               User?
+  documents          CustomerDocument[]
+  applications       FinancingApplication[]
+  loans              Loan[]
+  collectionCases    CollectionCase[]
+
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@map("customers")
+}
+
+model CustomerDocument {
+  id               String            @id @default(uuid())
+  customerId       String
+  customer         Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  category         DocumentCategory
+  title            String
+  fileKey          String            // S3 path o almacenamiento privado local
+  fileName         String
+  mimeType         String
+  fileSizeBytes    Int
+  status           DocumentStatus    @default(PENDING)
+  rejectionReason  String?
+  notes            String?
+  issueDate        DateTime?
+  expiryDate       DateTime?
+  uploadedById     String?
+  uploadedBy       User?             @relation("DocUploader", fields: [uploadedById], references: [id])
+
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@map("customer_documents")
+}
+
+// -----------------------------------------------------------------------------
+// CATÁLOGO DE VEHÍCULOS
+// -----------------------------------------------------------------------------
+
+model Vehicle {
+  id               String              @id @default(uuid())
+  code             String              @unique // VEH-0001
+  brand            String
+  model            String
+  year             Int
+  version          String?
+  type             String              // Sedan, SUV, Pickup, Hatchback
+  transmission     VehicleTransmission @default(AUTOMATIC)
+  fuel             VehicleFuel         @default(GASOLINE)
+  engineCc         Int?
+  mileageKm        Int
+  color            String
+  passengers       Int                 @default(5)
+  description      String              @db.Text
+  features         String[]            @default([]) // Acabados, A/C, sensores, pantalla
+  salePrice        Decimal             @db.Decimal(12, 2)
+  minDownPayment   Decimal             @db.Decimal(12, 2)
+  costPrice        Decimal?            @db.Decimal(12, 2) // Confidencial interno
+  status           VehicleStatus       @default(AVAILABLE)
+  isPublished      Boolean             @default(true)
+
+  images           VehicleImage[]
+  statusHistory    VehicleStatusHistory[]
+  leads            Lead[]
+  applications     FinancingApplication[]
+  loans            Loan[]
+
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([brand, model, year])
+  @@index([status, isPublished])
+  @@map("vehicles")
+}
+
+model VehicleImage {
+  id               String    @id @default(uuid())
+  vehicleId        String
+  vehicle          Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  url              String
+  isPrimary        Boolean   @default(false)
+  sortOrder        Int       @default(0)
+  caption          String?
+
+  createdAt        DateTime  @default(now())
+
+  @@map("vehicle_images")
+}
+
+model VehicleStatusHistory {
+  id               String        @id @default(uuid())
+  vehicleId        String
+  vehicle          Vehicle       @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  fromStatus       VehicleStatus
+  toStatus         VehicleStatus
+  reason           String?
+  changedByUserId  String?
+
+  createdAt        DateTime      @default(now())
+
+  @@map("vehicle_status_history")
+}
+
+// -----------------------------------------------------------------------------
+// PROSPECTOS (LEADS)
+// -----------------------------------------------------------------------------
+
+model Lead {
+  id               String        @id @default(uuid())
+  code             String        @unique // PROS-0001
+  fullName         String
+  phone            String
+  email            String
+  message          String?       @db.Text
+  source           LeadSource    @default(CATALOG_REQUEST)
+  status           LeadStatus    @default(NEW)
+  privacyAccepted  Boolean       @default(true)
+  vehicleId        String?
+  vehicle          Vehicle?      @relation(fields: [vehicleId], references: [id])
+  estimatedDown    Decimal?      @db.Decimal(12, 2)
+  termMonths       Int?
+  assignedToUserId String?
+  internalNotes    String?       @db.Text
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@map("leads")
+}
+
+// -----------------------------------------------------------------------------
+// PRODUCTOS FINANCIEROS Y SOLICITUDES
+// -----------------------------------------------------------------------------
+
+model FinancingProduct {
+  id               String             @id @default(uuid())
+  code             String             @unique // PROD-ESTANDAR
+  name             String
+  description      String?
+  minMonthlyRate   Decimal            @db.Decimal(6, 4) // ej: 0.0150 (1.5%)
+  maxMonthlyRate   Decimal            @db.Decimal(6, 4)
+  defaultMonthlyRate Decimal          @db.Decimal(6, 4)
+  minTermMonths    Int                @default(12)
+  maxTermMonths    Int                @default(72)
+  minDownPercent   Decimal            @default(15.00) @db.Decimal(5, 2)
+  dayCountBasis    DayCountBasis      @default(D30_360)
+  method           AmortizationMethod @default(FRENCH)
+  graceDays        Int                @default(5)
+  lateRateMonthly  Decimal?           @db.Decimal(6, 4) // ej: 0.0300 (3% mensual sobre mora)
+  isActive         Boolean            @default(true)
+
+  applications     FinancingApplication[]
+  loans            Loan[]
+
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@map("financing_products")
+}
+
+model FinancingApplication {
+  id                 String             @id @default(uuid())
+  code               String             @unique // SOL-2026-0001
+  customerId         String
+  customer           Customer           @relation(fields: [customerId], references: [id])
+  vehicleId          String
+  vehicle            Vehicle            @relation(fields: [vehicleId], references: [id])
+  productId          String
+  product            FinancingProduct   @relation(fields: [productId], references: [id])
+
+  vehiclePrice       Decimal            @db.Decimal(12, 2)
+  downPayment        Decimal            @db.Decimal(12, 2)
+  financedFees       Decimal            @default(0) @db.Decimal(12, 2)
+  principalRequested Decimal            @db.Decimal(12, 2)
+  termMonths         Int
+  proposedRate       Decimal            @db.Decimal(6, 4)
+  estimatedInstallment Decimal          @db.Decimal(12, 2)
+  status             ApplicationStatus  @default(SUBMITTED)
+
+  evaluations        CreditEvaluation[]
+  approvals          CreditApproval[]
+  loan               Loan?
+
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@map("financing_applications")
+}
+
+model CreditEvaluation {
+  id                 String                @id @default(uuid())
+  applicationId      String
+  application        FinancingApplication  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  evaluatorId        String
+  evaluator          User                  @relation("Evaluator", fields: [evaluatorId], references: [id])
+  capacityDebtRatio  Decimal               @db.Decimal(5, 2) // Porcentaje de endeudamiento
+  verifiedIncome     Decimal               @db.Decimal(12, 2)
+  riskScore          String?
+  checklistVerified  Boolean               @default(false)
+  recommendation     String                // APROBAR, RECHAZAR, CONDICIONAR
+  comments           String                @db.Text
+
+  createdAt          DateTime              @default(now())
+
+  @@map("credit_evaluations")
+}
+
+model CreditApproval {
+  id                 String                @id @default(uuid())
+  applicationId      String
+  application        FinancingApplication  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  officerId          String
+  officer            User                  @relation("Approver", fields: [officerId], references: [id])
+  isApproved         Boolean
+  approvedAmount     Decimal               @db.Decimal(12, 2)
+  approvedRate       Decimal               @db.Decimal(6, 4)
+  approvedTermMonths Int
+  conditions         String?               @db.Text
+  signedAt           DateTime              @default(now())
+
+  @@map("credit_approvals")
+}
+
+// -----------------------------------------------------------------------------
+// CRÉDITOS, AMORTIZACIÓN Y PAGOS (FINANZAS PERSISTENTES)
+// -----------------------------------------------------------------------------
+
+model Loan {
+  id                   String             @id @default(uuid())
+  code                 String             @unique // CRE-2026-0001
+  customerId           String
+  customer             Customer           @relation(fields: [customerId], references: [id])
+  vehicleId            String
+  vehicle              Vehicle            @relation(fields: [vehicleId], references: [id])
+  productId            String
+  product              FinancingProduct   @relation(fields: [productId], references: [id])
+  applicationId        String?            @unique
+  application          FinancingApplication? @relation(fields: [applicationId], references: [id])
+
+  vehiclePrice         Decimal            @db.Decimal(12, 2)
+  downPayment          Decimal            @db.Decimal(12, 2)
+  financedFees         Decimal            @default(0) @db.Decimal(12, 2)
+  originalPrincipal    Decimal            @db.Decimal(12, 2)
+  currentPrincipalBalance Decimal         @db.Decimal(12, 2)
+
+  monthlyRate          Decimal            @db.Decimal(6, 4)
+  termCount            Int
+  frequency            PaymentFrequency   @default(MONTHLY)
+  dayCount             DayCountBasis      @default(D30_360)
+  method               AmortizationMethod @default(FRENCH)
+  graceDays            Int                @default(5)
+  lateRateMonthly      Decimal?           @db.Decimal(6, 4)
+
+  disbursementDate     DateTime           @db.Date
+  firstDueDate         DateTime           @db.Date
+  status               LoanStatus         @default(ACTIVE)
+
+  contractVersions     LoanContractVersion[]
+  installments         AmortizationInstallment[]
+  payments             PaymentTransaction[]
+  collectionCases      CollectionCase[]
+  statements           AccountStatement[]
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@map("loans")
+}
+
+model LoanContractVersion {
+  id                 String             @id @default(uuid())
+  loanId             String
+  loan               Loan               @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  versionIndex       Int                // 0 = Original, 1 = tras Abono, etc.
+  reason             String             // ORIGINAL, PREPAYMENT, RESTRUCTURE
+  effectiveDate      DateTime           @db.Date
+  principalBalance   Decimal            @db.Decimal(12, 2)
+  monthlyRate        Decimal            @db.Decimal(6, 4)
+  levelPayment       Decimal?           @db.Decimal(12, 2)
+  policyApplied      PrepaymentPolicy?
+  pdfDocumentUrl     String?
+
+  createdAt          DateTime           @default(now())
+
+  @@unique([loanId, versionIndex])
+  @@map("loan_contract_versions")
+}
+
+model AmortizationInstallment {
+  id                 String             @id @default(uuid())
+  loanId             String
+  loan               Loan               @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  versionIndex       Int                @default(0)
+  number             Int
+  periodStart        DateTime           @db.Date
+  dueDate            DateTime           @db.Date
+  openingBalance     Decimal            @db.Decimal(12, 2)
+  scheduledPrincipal Decimal            @db.Decimal(12, 2)
+  scheduledInterest  Decimal            @db.Decimal(12, 2)
+  scheduledPayment   Decimal            @db.Decimal(12, 2)
+  closingBalance     Decimal            @db.Decimal(12, 2)
+
+  paidPrincipal      Decimal            @default(0) @db.Decimal(12, 2)
+  paidInterest       Decimal            @default(0) @db.Decimal(12, 2)
+  lateAccrued        Decimal            @default(0) @db.Decimal(12, 2)
+  paidLateInterest   Decimal            @default(0) @db.Decimal(12, 2)
+  status             InstallmentStatus  @default(PENDING)
+
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([loanId, versionIndex, number])
+  @@index([loanId, dueDate, status])
+  @@map("amortization_installments")
+}
+
+model PaymentTransaction {
+  id                 String             @id @default(uuid())
+  code               String             @unique // PAG-2026-0001
+  loanId             String
+  loan               Loan               @relation(fields: [loanId], references: [id])
+  sequenceNumber     Int
+  effectiveDate      DateTime           @db.Date
+  registeredAt       DateTime           @default(now())
+  amountReceived     Decimal            @db.Decimal(12, 2)
+  amountApplied      Decimal            @db.Decimal(12, 2)
+  kind               PaymentKind        @default(INSTALLMENT)
+  policy             PrepaymentPolicy?
+  paymentMethod      PaymentMethod      @default(BANK_TRANSFER)
+  referenceNumber    String?
+  notes              String?            @db.Text
+  idempotencyKey     String             @unique
+  isReversed         Boolean            @default(false)
+
+  registeredById     String
+  registeredBy       User               @relation("PaymentRegistrar", fields: [registeredById], references: [id])
+
+  allocations        PaymentAllocation[]
+  reversal           PaymentReversal?
+
+  createdAt          DateTime           @default(now())
+
+  @@index([loanId, effectiveDate])
+  @@map("payment_transactions")
+}
+
+model PaymentAllocation {
+  id                 String             @id @default(uuid())
+  paymentId          String
+  payment            PaymentTransaction @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  concept            AllocationConcept
+  installmentNumber  Int?
+  amount             Decimal            @db.Decimal(12, 2)
+
+  createdAt          DateTime           @default(now())
+
+  @@map("payment_allocations")
+}
+
+model PaymentReversal {
+  id                 String             @id @default(uuid())
+  paymentId          String             @unique
+  payment            PaymentTransaction @relation(fields: [paymentId], references: [id])
+  reversalDate       DateTime           @db.Date
+  reason             String             @db.Text
+  authorizedById     String
+  authorizedBy       User               @relation("ReversalAuthorizer", fields: [authorizedById], references: [id])
+
+  createdAt          DateTime           @default(now())
+
+  @@map("payment_reversals")
+}
+
+model AccountStatement {
+  id                 String             @id @default(uuid())
+  loanId             String
+  loan               Loan               @relation(fields: [loanId], references: [id])
+  cutOffDate         DateTime           @db.Date
+  openingBalance     Decimal            @db.Decimal(12, 2)
+  accruedInterest    Decimal            @db.Decimal(12, 2)
+  paymentsReceived   Decimal            @db.Decimal(12, 2)
+  closingBalance     Decimal            @db.Decimal(12, 2)
+  pdfUrl             String?
+
+  createdAt          DateTime           @default(now())
+
+  @@map("account_statements")
+}
+
+// -----------------------------------------------------------------------------
+// COBRANZA Y GESTIÓN DE MORA
+// -----------------------------------------------------------------------------
+
+model CollectionCase {
+  id                 String               @id @default(uuid())
+  loanId             String
+  loan               Loan                 @relation(fields: [loanId], references: [id])
+  customerId         String
+  customer           Customer             @relation(fields: [customerId], references: [id])
+  daysOverdue        Int                  @default(0)
+  totalOverdueAmount Decimal              @default(0) @db.Decimal(12, 2)
+  isOpen             Boolean              @default(true)
+
+  activities         CollectionActivity[]
+
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@map("collection_cases")
+}
+
+model CollectionActivity {
+  id                 String             @id @default(uuid())
+  caseId             String
+  case               CollectionCase     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  agentId            String
+  agent              User               @relation("Collector", fields: [agentId], references: [id])
+  activityType       String             // LLAMADA, CORREO, VISITA, PROMESA_PAGO
+  notes              String             @db.Text
+  promiseDate        DateTime?          @db.Date
+  promiseAmount      Decimal?           @db.Decimal(12, 2)
+
+  createdAt          DateTime           @default(now())
+
+  @@map("collection_activities")
+}
+
+// -----------------------------------------------------------------------------
+// AUDITORÍA Y NOTIFICACIONES
+// -----------------------------------------------------------------------------
+
+model NotificationLog {
+  id                 String              @id @default(uuid())
+  recipientEmail     String
+  recipientPhone     String?
+  subject            String
+  templateName       String
+  channel            NotificationChannel @default(EMAIL)
+  status             NotificationStatus  @default(PENDING)
+  errorMessage       String?
+  sentAt             DateTime?
+
+  createdAt          DateTime            @default(now())
+
+  @@map("notification_logs")
+}
+
+model AuditLog {
+  id                 String       @id @default(uuid())
+  userId             String?
+  user               User?        @relation("UserAudits", fields: [userId], references: [id])
+  action             String       // LOGIN, CREATE_LOAN, APPLY_PAYMENT, REVERSE_PAYMENT
+  entityName         String       // Loan, Customer, Payment
+  entityId           String?
+  ipAddress          String?
+  userAgent          String?
+  payloadBefore      Json?
+  payloadAfter       Json?
+
+  createdAt          DateTime     @default(now())
+
+  @@index([action, entityName])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model SystemSetting {
+  id                 String       @id @default(uuid())
+  key                String       @unique
+  value              String
+  description        String?
+  isPublic           Boolean      @default(false)
+
+  updatedAt          DateTime     @updatedAt
+
+  @@map("system_settings")
+}

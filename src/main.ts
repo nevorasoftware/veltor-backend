@@ -1,0 +1,76 @@
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { ValidationPipe } from '@nestjs/common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import helmet from 'helmet';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  // Seguridad: Cabeceras HTTP con Helmet
+  app.use(
+    helmet({
+      contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false,
+      crossOriginEmbedderPolicy: false,
+    }),
+  );
+
+  // CORS configurable
+  const allowedOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
+    : ['http://localhost:5173', 'http://localhost:3000'];
+
+  app.enableCors({
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        callback(null, true);
+      } else {
+        callback(null, true); // Permite acceso en modo desarrollo
+      }
+    },
+    credentials: true,
+  });
+
+  // Prefijo global de API
+  const apiPrefix = process.env.API_PREFIX || 'api/v1';
+  app.setGlobalPrefix(apiPrefix);
+
+  // Validación global estricta con DTOs
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: false,
+    }),
+  );
+
+  // Documentación Swagger / OpenAPI
+  const config = new DocumentBuilder()
+    .setTitle('VELTOR — API de Financiamiento de Vehículos')
+    .setDescription(
+      'Plataforma integral de gestión y financiamiento vehicular. Desarrollado y respaldado por Nevora Software.',
+    )
+    .setVersion('1.0.0')
+    .addBearerAuth()
+    .addTag('Simulador Financiero', 'Motor de cálculo y proyecciones de financiamiento')
+    .addTag('Catálogo de Vehículos', 'Publicación y consulta de inventario vehicular')
+    .addTag('Prospectos (Leads)', 'Captación pública de solicitudes sin registro')
+    .addTag('Finanzas y Pagos', 'Créditos, amortizaciones, abonos y reversiones')
+    .addTag('Gestión de Clientes', 'Expedientes de clientes y solicitudes')
+    .addTag('Reportes e Indicadores Financieros', 'Métricas del dashboard y cartera')
+    .addTag('Autenticación y Sesiones', 'Seguridad, tokens JWT y control de acceso')
+    .build();
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('docs', app, document);
+
+  const port = process.env.PORT || 4000;
+  await app.listen(port);
+  console.log(`=======================================================`);
+  console.log(`  VELTOR Backend — Desarrollado por Nevora Software   `);
+  console.log(`  Servidor escuchando en: http://localhost:${port}/${apiPrefix}`);
+  console.log(`  Documentación Swagger:  http://localhost:${port}/docs`);
+  console.log(`=======================================================`);
+}
+
+bootstrap();
