@@ -30,7 +30,7 @@ WORKDIR /app
 RUN apk add --no-cache openssl libc6-compat
 
 ENV NODE_ENV=production
-ENV PORT=4000
+ENV PORT=8080
 
 # Copiar dependencias de producción y binarios compilados
 COPY package*.json ./
@@ -46,7 +46,6 @@ RUN mkdir -p uploads/documents && chown -R node:node /app
 
 USER node
 
-EXPOSE 4000
+EXPOSE 8080
 
-# Script de arranque con soporte para migraciones en la nube
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
+CMD ["node", "dist/main.js"]
