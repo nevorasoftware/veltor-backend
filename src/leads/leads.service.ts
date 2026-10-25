@@ -15,6 +15,8 @@ import {
 import { IsNotEmpty, IsString, IsEmail, IsOptional, IsNumber, IsBoolean, IsArray } from 'class-validator';
 import * as fs from 'fs';
 import * as path from 'path';
+import Decimal from 'decimal.js';
+import { generateSchedule } from '../finance/engine';
 
 export class CreateLeadDto {
   @IsString()
@@ -443,6 +445,42 @@ export class LeadsService {
         levelPayment: Number(cuota.toFixed(2)),
       },
     });
+
+    // 8.5. Generar y persistir cuotas de amortización en base de datos
+    try {
+      const generated = generateSchedule({
+        principal: new Decimal(principal),
+        monthlyRate: new Decimal(monthlyRate),
+        dayCount: 'D30_360',
+        frequency: 'MONTHLY',
+        rounding: 'HALF_UP',
+        method: 'FRENCH',
+        startDate: today.toISOString().split('T')[0],
+        startNumber: 1,
+        anchorDate: nextMonth.toISOString().split('T')[0],
+        anchorNumber: 1,
+        count: termCount,
+      });
+
+      await this.prisma.amortizationInstallment.createMany({
+        data: generated.installments.map((inst) => ({
+          loanId: loan.id,
+          versionIndex: 0,
+          number: inst.number,
+          dueDate: new Date(inst.dueDate),
+          periodStart: new Date(inst.periodStart),
+          openingBalance: inst.openingBalance.toNumber(),
+          scheduledPrincipal: inst.principal.toNumber(),
+          scheduledInterest: inst.interest.toNumber(),
+          scheduledPayment: inst.payment.toNumber(),
+          closingBalance: inst.closingBalance.toNumber(),
+          status: 'PENDING' as any,
+        })),
+        skipDuplicates: true,
+      });
+    } catch (schedErr: any) {
+      this.logger.warn(`Error al generar cuotas de amortización para ${loanCode}: ${schedErr?.message}`);
+    }
 
     // 9. Actualizar Vehículo y Prospecto
     await this.prisma.vehicle.update({

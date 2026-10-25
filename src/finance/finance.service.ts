@@ -19,8 +19,10 @@ export class FinanceService {
 
   /** Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. */
   async getLoanLedgerSnapshot(loanId: string, asOfDate?: string) {
-    const loan = await this.prisma.loan.findUnique({
-      where: { id: loanId },
+    const loan = await this.prisma.loan.findFirst({
+      where: {
+        OR: [{ id: loanId }, { code: loanId }],
+      },
       include: {
         customer: true,
         vehicle: true,
@@ -78,8 +80,10 @@ export class FinanceService {
     // Usamos el snapshot para cotizar
     const liveLedger = new LoanLedger(contract);
     // Aplicamos los eventos existentes no revertidos
-    const loan = await this.prisma.loan.findUnique({
-      where: { id: loanId },
+    const loan = await this.prisma.loan.findFirst({
+      where: {
+        OR: [{ id: loanId }, { code: loanId }],
+      },
       include: {
         payments: {
           where: { isReversed: false },
@@ -133,7 +137,7 @@ export class FinanceService {
 
     // 3. Ejecutar en motor financiero
     const previousPayments = await this.prisma.paymentTransaction.findMany({
-      where: { loanId: dto.loanId, isReversed: false },
+      where: { loanId: loan.id, isReversed: false },
       orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }],
     });
 
@@ -168,7 +172,7 @@ export class FinanceService {
       const newPayment = await tx.paymentTransaction.create({
         data: {
           code: pCode,
-          loanId: dto.loanId,
+          loanId: loan.id,
           sequenceNumber: nextSeq,
           effectiveDate: new Date(dto.effectiveDate),
           amountReceived: D(dto.amount).toNumber(),
@@ -193,7 +197,7 @@ export class FinanceService {
 
       // Actualizar saldo de capital en Loan
       await tx.loan.update({
-        where: { id: dto.loanId },
+        where: { id: loan.id },
         data: {
           currentPrincipalBalance: D(ledger.balance).toNumber(),
           status: ledger.balance === '0.00' ? 'PAID_OFF' : 'ACTIVE',
@@ -205,7 +209,7 @@ export class FinanceService {
         const snap = ledger.snapshot(dto.effectiveDate);
         await tx.loanContractVersion.create({
           data: {
-            loanId: dto.loanId,
+            loanId: loan.id,
             versionIndex: snap.versions.length - 1,
             reason: 'PREPAYMENT',
             effectiveDate: new Date(dto.effectiveDate),

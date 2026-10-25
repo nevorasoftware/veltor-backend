@@ -1,14 +1,18 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import PDFDocument from 'pdfkit';
+import Decimal from 'decimal.js';
+import { generateSchedule } from '../finance/engine';
 
 @Injectable()
 export class PdfService {
   constructor(private readonly prisma: PrismaService) {}
 
   async generateAmortizationSchedulePdf(loanId: string): Promise<Buffer> {
-    const loan = await this.prisma.loan.findUnique({
-      where: { id: loanId },
+    const loan = await this.prisma.loan.findFirst({
+      where: {
+        OR: [{ id: loanId }, { code: loanId }],
+      },
       include: {
         customer: true,
         vehicle: true,
@@ -19,7 +23,65 @@ export class PdfService {
     });
 
     if (!loan) {
-      throw new NotFoundException(`Crédito con ID ${loanId} no encontrado`);
+      throw new NotFoundException(`Crédito con ID o código ${loanId} no encontrado`);
+    }
+
+    let installmentsToRender: any[] = loan.installments;
+
+    if (!installmentsToRender || installmentsToRender.length === 0) {
+      try {
+        const startDateStr = (loan.disbursementDate ? new Date(loan.disbursementDate) : new Date())
+          .toISOString()
+          .split('T')[0];
+        const firstDueDateStr = (loan.firstDueDate ? new Date(loan.firstDueDate) : new Date())
+          .toISOString()
+          .split('T')[0];
+        const generated = generateSchedule({
+          principal: new Decimal(loan.originalPrincipal),
+          monthlyRate: new Decimal(loan.monthlyRate),
+          dayCount: (loan.dayCount as any) || 'D30_360',
+          frequency: (loan.frequency as any) || 'MONTHLY',
+          rounding: 'HALF_UP',
+          method: (loan.method as any) || 'FRENCH',
+          startDate: startDateStr,
+          startNumber: 1,
+          anchorDate: firstDueDateStr,
+          anchorNumber: 1,
+          count: loan.termCount || 36,
+        });
+
+        installmentsToRender = generated.installments.map((inst) => ({
+          number: inst.number,
+          dueDate: new Date(inst.dueDate),
+          openingBalance: inst.openingBalance.toNumber(),
+          scheduledPrincipal: inst.principal.toNumber(),
+          scheduledInterest: inst.interest.toNumber(),
+          scheduledPayment: inst.payment.toNumber(),
+          closingBalance: inst.closingBalance.toNumber(),
+          status: 'PENDING',
+        }));
+
+        this.prisma.amortizationInstallment
+          .createMany({
+            data: installmentsToRender.map((inst) => ({
+              loanId: loan.id,
+              versionIndex: 0,
+              number: inst.number,
+              dueDate: inst.dueDate,
+              periodStart: new Date(startDateStr),
+              openingBalance: inst.openingBalance,
+              scheduledPrincipal: inst.scheduledPrincipal,
+              scheduledInterest: inst.scheduledInterest,
+              scheduledPayment: inst.scheduledPayment,
+              closingBalance: inst.closingBalance,
+              status: 'PENDING',
+            })),
+            skipDuplicates: true,
+          })
+          .catch(() => {});
+      } catch (e) {
+        installmentsToRender = [];
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -99,8 +161,8 @@ export class PdfService {
       // Iteración de cuotas
       doc.font('Helvetica').fontSize(7.5);
 
-      for (let i = 0; i < loan.installments.length; i++) {
-        const item = loan.installments[i];
+      for (let i = 0; i < installmentsToRender.length; i++) {
+        const item = installmentsToRender[i];
 
         // Manejo de salto de página
         if (currentY > 720) {
@@ -153,8 +215,10 @@ export class PdfService {
   }
 
   async generateAccountStatementPdf(loanId: string): Promise<Buffer> {
-    const loan = await this.prisma.loan.findUnique({
-      where: { id: loanId },
+    const loan = await this.prisma.loan.findFirst({
+      where: {
+        OR: [{ id: loanId }, { code: loanId }],
+      },
       include: {
         customer: true,
         vehicle: true,
@@ -170,7 +234,7 @@ export class PdfService {
     });
 
     if (!loan) {
-      throw new NotFoundException(`Crédito con ID ${loanId} no encontrado`);
+      throw new NotFoundException(`Crédito con ID o código ${loanId} no encontrado`);
     }
 
     return new Promise((resolve, reject) => {
