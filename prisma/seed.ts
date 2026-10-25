@@ -1,4 +1,4 @@
-import { PrismaClient, UserRole, PersonType, VehicleStatus, VehicleTransmission, VehicleFuel, AmortizationMethod, DayCountBasis, PaymentFrequency, LeadSource, LeadStatus, ApplicationStatus, LoanStatus, PaymentKind, PaymentMethod, AllocationConcept } from '@prisma/client';
+import { PrismaClient, UserRole, PersonType, CustomerStatus, VehicleStatus, VehicleTransmission, VehicleFuel, AmortizationMethod, DayCountBasis, PaymentFrequency, LeadSource, LeadStatus, ApplicationStatus, LoanStatus, PaymentKind, PaymentMethod, AllocationConcept } from '@prisma/client';
 import * as argon2 from 'argon2';
 
 const prisma = new PrismaClient();

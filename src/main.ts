@@ -18,7 +18,7 @@ async function bootstrap() {
   // CORS configurable
   const allowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-    : ['http://localhost:5173', 'http://localhost:3000'];
+    : ['http://localhost:5173', 'http://localhost:3000', 'https://veltor.up.railway.app', 'https://veltor-backend-production.up.railway.app'];
 
   app.enableCors({
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -64,8 +64,8 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
 
-  const port = process.env.PORT || 4000;
-  await app.listen(port);
+  const port = process.env.PORT || 8080;
+  await app.listen(port, '0.0.0.0');
   console.log(`=======================================================`);
   console.log(`  VELTOR Backend — Desarrollado por Nevora Software   `);
   console.log(`  Servidor escuchando en: http://localhost:${port}/${apiPrefix}`);
