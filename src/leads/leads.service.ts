@@ -250,10 +250,10 @@ export class LeadsService {
     });
     if (!lead) throw new NotFoundException('Prospecto no encontrado');
 
-    // 1. Validar documentos obligatorios
-    if (!dto.documents || !Array.isArray(dto.documents) || dto.documents.length < 4) {
+    // 1. Validar documentos obligatorios (5 requeridos)
+    if (!dto.documents || !Array.isArray(dto.documents) || dto.documents.length < 5) {
       throw new BadRequestException(
-        'Para formalizar a Crédito Activo es obligatorio adjuntar los 4 documentos del cliente: DUI, NIT, Licencia de Conducir y Comprobante de Ingresos.',
+        'Para formalizar a Crédito Activo es obligatorio adjuntar los 5 documentos del cliente: DUI, NIT, Licencia de Conducir, Comprobante de Ingresos y Recibo de Agua o Luz.',
       );
     }
 
@@ -265,16 +265,18 @@ export class LeadsService {
       categories.includes(DocumentCategory.PAYSLIP) ||
       categories.includes(DocumentCategory.BANK_STATEMENT) ||
       categories.includes(DocumentCategory.TAX_RETURN);
+    const hasUtility = categories.includes(DocumentCategory.UTILITY_BILL);
 
     const missingDocs: string[] = [];
     if (!hasDui) missingDocs.push('DUI');
     if (!hasNit) missingDocs.push('NIT');
     if (!hasLicense) missingDocs.push('Licencia de Conducir');
     if (!hasIncome) missingDocs.push('Comprobante de Ingresos');
+    if (!hasUtility) missingDocs.push('Recibo de Agua o Luz (Comprobante de Domicilio)');
 
     if (missingDocs.length > 0) {
       throw new BadRequestException(
-        `Faltan documentos obligatorios: ${missingDocs.join(', ')}. No es posible activar el crédito sin el expediente completo.`,
+        `Faltan documentos obligatorios: ${missingDocs.join(', ')}. No es posible activar el crédito sin el expediente completo de 5 documentos.`,
       );
     }
 
