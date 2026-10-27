@@ -393,12 +393,15 @@ export class LeadsService {
         : Math.round(vehiclePrice * 0.15);
     const principal = Math.max(100, vehiclePrice - downPayment);
     const termCount = dto.termMonths || lead.termMonths || 36;
-    const monthlyRate = dto.monthlyRate || Number(product.defaultMonthlyRate);
+    const monthlyRate =
+      dto.monthlyRate !== undefined && dto.monthlyRate !== null
+        ? Number(dto.monthlyRate)
+        : Number(product.defaultMonthlyRate);
 
-    // Cálculo de cuota nivelada francesa
+    // Cálculo de cuota nivelada francesa exacta
     const i = monthlyRate;
     const n = termCount;
-    const cuota = (principal * i) / (1 - Math.pow(1 + i, -n));
+    const cuota = i === 0 ? principal / n : (principal * i) / (1 - Math.pow(1 + i, -n));
 
     // Fechas
     const today = new Date();

@@ -729,3 +729,43 @@ model SystemSetting {
 
   @@map("system_settings")
 }
+
+// -----------------------------------------------------------------------------
+// CONTROL DE GASTOS (PRODUCTOS Y SERVICIOS)
+// -----------------------------------------------------------------------------
+
+enum ExpenseCategoryType {
+  PRODUCT
+  SERVICE
+}
+
+enum ExpenseStatus {
+  PAID
+  PENDING
+  CANCELLED
+}
+
+model Expense {
+  id            String              @id @default(uuid())
+  code          String              @unique
+  concept       String
+  categoryType  ExpenseCategoryType
+  subcategory   String?
+  amount        Decimal             @db.Decimal(12, 2)
+  quantity      Decimal             @default(1.00) @db.Decimal(10, 2)
+  unitPrice     Decimal             @db.Decimal(12, 2)
+  expenseDate   DateTime            @default(now())
+  provider      String?
+  invoiceNumber String?
+  paymentMethod String?
+  status        ExpenseStatus       @default(PAID)
+  notes         String?
+  createdById   String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([categoryType])
+  @@index([expenseDate])
+  @@index([status])
+  @@map("expenses")
+}

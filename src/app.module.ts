@@ -10,6 +10,7 @@ import { ReportsModule } from './reports/reports.module';
 import { DocumentsModule } from './documents/documents.module';
 import { PdfModule } from './pdf/pdf.module';
 import { SettingsModule } from './settings/settings.module';
+import { ExpensesModule } from './expenses/expenses.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -28,6 +29,7 @@ import { HealthController } from './health/health.controller';
     DocumentsModule,
     PdfModule,
     SettingsModule,
+    ExpensesModule,
   ],
   controllers: [HealthController],
 })
