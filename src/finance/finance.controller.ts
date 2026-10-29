@@ -1,9 +1,10 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Request } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { FinanceService } from './finance.service';
-import { PaymentKind, PaymentMethod } from '@prisma/client';
+import { PaymentKind, PaymentMethod, UserRole } from '@prisma/client';
+import { Roles } from '../auth/roles.decorator';
 import { PrepaymentPolicy } from './engine';
-import { IsEnum, IsNotEmpty, IsNumberString, IsOptional, IsString } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsNumberString, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class RegisterPaymentDto {
   @IsString()
@@ -43,10 +44,12 @@ export class RegisterPaymentDto {
 export class ReversePaymentDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(1000)
   reason!: string;
 }
 
 @ApiTags('Finanzas y Pagos')
+@ApiBearerAuth()
 @Controller('finance')
 export class FinanceController {
   constructor(private readonly financeService: FinanceService) {}
@@ -65,19 +68,18 @@ export class FinanceController {
 
   @Post('payments')
   @ApiOperation({ summary: 'Registrar pago ordinario, abono extraordinario a capital o cancelación' })
+  @Roles(UserRole.ADMIN, UserRole.CASHIER, UserRole.COLLECTIONS_AGENT)
   async registerPayment(@Body() dto: RegisterPaymentDto, @Request() req: any) {
-    // Si viene usuario autenticado usamos su id, de lo contrario un id de sistema o dto
-    const userId = req.user?.id || 'system-user';
     return this.financeService.registerPayment({
       ...dto,
-      registeredById: userId,
+      registeredById: req.user.id,
     });
   }
 
   @Post('payments/:id/reverse')
   @ApiOperation({ summary: 'Reversión autorizada de un pago y reconstrucción de saldos' })
+  @Roles(UserRole.ADMIN, UserRole.APPROVAL_OFFICER)
   async reversePayment(@Param('id') id: string, @Body() dto: ReversePaymentDto, @Request() req: any) {
-    const userId = req.user?.id || 'system-authorizer';
-    return this.financeService.reversePayment(id, userId, dto.reason);
+    return this.financeService.reversePayment(id, req.user.id, dto.reason);
   }
 }

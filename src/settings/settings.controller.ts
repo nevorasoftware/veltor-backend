@@ -1,7 +1,10 @@
-import { Controller, Get, Patch, Body, Request, BadRequestException } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, Patch, Body, Request } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { UserRole } from '@prisma/client';
 import { SettingsService } from './settings.service';
 import { IsNumber, Min, Max } from 'class-validator';
+import { Public } from '../auth/public.decorator';
+import { Roles } from '../auth/roles.decorator';
 
 export class UpdatePreferentialRateDto {
   @IsNumber()
@@ -15,6 +18,7 @@ export class UpdatePreferentialRateDto {
 export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
+  @Public()
   @Get('public')
   @ApiOperation({ summary: 'Obtener configuración pública del sistema (tasa preferencial, plazos, prima)' })
   async getPublicSettings() {
@@ -22,13 +26,10 @@ export class SettingsController {
   }
 
   @Patch('preferential-rate')
+  @Roles(UserRole.ADMIN)
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Actualizar tasa preferencial del simulador (Administración)' })
   async updatePreferentialRate(@Body() body: UpdatePreferentialRateDto, @Request() req: any) {
-    try {
-      const userId = req.user?.id || 'system-admin';
-      return await this.settingsService.updatePreferentialRate(body.monthlyRate, userId);
-    } catch (err: any) {
-      throw new BadRequestException(err.message || 'Error al actualizar la tasa');
-    }
+    return this.settingsService.updatePreferentialRate(body.monthlyRate, req.user.id);
   }
 }

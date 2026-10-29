@@ -1,16 +1,17 @@
 import { Controller, Get, Post, Put, Body, Param, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { CustomersService, CreateCustomerDto } from './customers.service';
-import { CustomerStatus } from '@prisma/client';
+import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { CustomersService } from './customers.service';
+import { CreateCustomerDto, CustomerQueryDto, UpdateCustomerDto } from './customer.dto';
 
 @ApiTags('Gestión de Clientes')
+@ApiBearerAuth()
 @Controller('customers')
 export class CustomersController {
   constructor(private readonly customersService: CustomersService) {}
 
   @Get()
   @ApiOperation({ summary: 'Listar y filtrar clientes con paginación' })
-  async findAll(@Query() query: { search?: string; status?: CustomerStatus; page?: number; limit?: number }) {
+  async findAll(@Query() query: CustomerQueryDto) {
     return this.customersService.findAll(query);
   }
 
@@ -28,7 +29,15 @@ export class CustomersController {
 
   @Put(':id')
   @ApiOperation({ summary: 'Actualizar información del cliente' })
-  async update(@Param('id') id: string, @Body() dto: Partial<CreateCustomerDto>) {
+  async update(@Param('id') id: string, @Body() dto: UpdateCustomerDto) {
     return this.customersService.update(id, dto);
+  }
+
+  @Post(':id/portal-access')
+  @ApiOperation({
+    summary: 'Crear o restablecer el acceso del cliente al portal (devuelve una contraseña temporal una sola vez)',
+  })
+  async grantPortalAccess(@Param('id') id: string) {
+    return this.customersService.grantPortalAccess(id);
   }
 }

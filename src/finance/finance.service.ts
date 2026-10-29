@@ -4,106 +4,93 @@ import {
   LoanContract,
   LoanEvent,
   LoanLedger,
-  PaymentEvent,
   PrepaymentPolicy,
   toDateStr,
   todayInTz,
+  isValidDate,
+  cmp,
   D,
-  fmt,
 } from './engine';
-import { PaymentKind, PaymentMethod } from '@prisma/client';
+import { Loan, LoanStatus, PaymentKind, PaymentMethod, PaymentTransaction, Prisma } from '@prisma/client';
+import { nextSequentialCode, withUniqueRetry } from '../common/codes';
+
+type LoanWithPayments = Loan & { payments: PaymentTransaction[] };
 
 @Injectable()
 export class FinanceService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. */
-  async getLoanLedgerSnapshot(loanId: string, asOfDate?: string) {
-    const loan = await this.prisma.loan.findFirst({
-      where: {
-        OR: [{ id: loanId }, { code: loanId }],
-      },
-      include: {
-        customer: true,
-        vehicle: true,
-        payments: {
-          where: { isReversed: false },
-          orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }],
-        },
-      },
-    });
-
-    if (!loan) throw new NotFoundException('Crédito no encontrado');
-
-    const contract: LoanContract = {
+  private buildContract(loan: Loan): LoanContract {
+    return {
       principal: loan.originalPrincipal.toFixed(2),
       monthlyRate: loan.monthlyRate.toString(),
       termCount: loan.termCount,
       startDate: toDateStr(loan.disbursementDate),
       firstDueDate: toDateStr(loan.firstDueDate),
-      method: loan.method as any,
-      dayCount: loan.dayCount as any,
-      frequency: loan.frequency as any,
+      method: loan.method,
+      dayCount: loan.dayCount,
+      frequency: loan.frequency,
       rounding: 'HALF_UP',
       graceDays: loan.graceDays,
       lateInterestMonthlyRate: loan.lateRateMonthly ? loan.lateRateMonthly.toString() : null,
     };
+  }
 
-    const events: LoanEvent[] = loan.payments.map((p) => ({
+  private toEvents(payments: PaymentTransaction[]): LoanEvent[] {
+    return payments.map((p) => ({
       type: 'PAYMENT',
       id: p.id,
       seq: p.sequenceNumber,
       date: toDateStr(p.effectiveDate),
       amount: p.amountReceived.toFixed(2),
-      kind: p.kind as any,
-      policy: (p.policy as any) || undefined,
+      kind: p.kind,
+      policy: p.policy ?? undefined,
     }));
-
-    const dateToUse = asOfDate || todayInTz();
-    const snapshot = LoanLedger.replay(contract, events, dateToUse);
-
-    return {
-      loan,
-      contract,
-      snapshot,
-    };
   }
 
-  /** Cotización exacta de liquidación total (Payoff Quote) */
-  async getPayoffQuote(loanId: string, targetDate?: string) {
-    const date = targetDate || todayInTz();
-    const { contract, snapshot } = await this.getLoanLedgerSnapshot(loanId, date);
-    const ledger = new LoanLedger(contract);
-    for (const ev of snapshot.results) {
-      // Re-apply to get instance quote
-    }
-    // Usamos el snapshot para cotizar
-    const liveLedger = new LoanLedger(contract);
-    // Aplicamos los eventos existentes no revertidos
+  private buildLedger(loan: Loan, payments: PaymentTransaction[]): LoanLedger {
+    const ledger = new LoanLedger(this.buildContract(loan));
+    for (const ev of this.toEvents(payments)) ledger.apply(ev);
+    return ledger;
+  }
+
+  private async findLoan(loanIdOrCode: string, where: Prisma.LoanWhereInput = {}) {
     const loan = await this.prisma.loan.findFirst({
-      where: {
-        OR: [{ id: loanId }, { code: loanId }],
-      },
+      where: { OR: [{ id: loanIdOrCode }, { code: loanIdOrCode }], ...where },
       include: {
+        customer: true,
+        vehicle: { include: { images: { where: { isPrimary: true }, take: 1 } } },
         payments: {
           where: { isReversed: false },
           orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }],
+          include: { allocations: true },
         },
       },
     });
-    for (const p of loan?.payments || []) {
-      liveLedger.apply({
-        type: 'PAYMENT',
-        id: p.id,
-        seq: p.sequenceNumber,
-        date: toDateStr(p.effectiveDate),
-        amount: p.amountReceived.toFixed(2),
-        kind: p.kind as any,
-        policy: (p.policy as any) || undefined,
-      });
-    }
+    if (!loan) throw new NotFoundException('Crédito no encontrado');
+    return loan;
+  }
 
-    return liveLedger.quote(date);
+  private validateDate(date: string | undefined, label: string) {
+    if (date && !isValidDate(date)) {
+      throw new BadRequestException(`${label} debe tener el formato AAAA-MM-DD.`);
+    }
+  }
+
+  /** Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. */
+  async getLoanLedgerSnapshot(loanId: string, asOfDate?: string, where: Prisma.LoanWhereInput = {}) {
+    this.validateDate(asOfDate, 'La fecha de corte');
+    const loan = await this.findLoan(loanId, where);
+    const contract = this.buildContract(loan);
+    const snapshot = LoanLedger.replay(contract, this.toEvents(loan.payments), asOfDate || todayInTz());
+    return { loan, contract, snapshot };
+  }
+
+  /** Cotización exacta de liquidación total (Payoff Quote) */
+  async getPayoffQuote(loanId: string, targetDate?: string, where: Prisma.LoanWhereInput = {}) {
+    this.validateDate(targetDate, 'La fecha objetivo');
+    const loan = await this.findLoan(loanId, where);
+    return this.buildLedger(loan, loan.payments).quote(targetDate || todayInTz());
   }
 
   /** Registra un pago (ordinario, abono extraordinario a capital o cancelación total) con transacción */
@@ -132,97 +119,111 @@ export class FinanceService {
       };
     }
 
-    // 2. Obtener estado actual del crédito
-    const { loan, contract } = await this.getLoanLedgerSnapshot(dto.loanId, dto.effectiveDate);
-
-    // 3. Ejecutar en motor financiero
-    const previousPayments = await this.prisma.paymentTransaction.findMany({
-      where: { loanId: loan.id, isReversed: false },
-      orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }],
-    });
-
-    const nextSeq = previousPayments.length + 1;
-    const ledger = new LoanLedger(contract);
-    for (const p of previousPayments) {
-      ledger.apply({
-        type: 'PAYMENT',
-        id: p.id,
-        seq: p.sequenceNumber,
-        date: toDateStr(p.effectiveDate),
-        amount: p.amountReceived.toFixed(2),
-        kind: p.kind as any,
-        policy: (p.policy as any) || undefined,
-      });
+    this.validateDate(dto.effectiveDate, 'La fecha efectiva');
+    if (cmp(dto.effectiveDate, todayInTz()) > 0) {
+      throw new BadRequestException('La fecha efectiva del pago no puede ser futura.');
+    }
+    if (!D(dto.amount).gt(0)) throw new BadRequestException('El monto del pago debe ser mayor a cero.');
+    if (dto.kind === 'PRINCIPAL_PREPAYMENT' && !dto.policy) {
+      throw new BadRequestException('Indique si el abono a capital reduce el plazo o la cuota.');
     }
 
-    const tempEventId = `temp-pay-${Date.now()}`;
+    const loan: LoanWithPayments = await this.findLoan(dto.loanId);
+    if (loan.status !== LoanStatus.ACTIVE) {
+      throw new BadRequestException(`El crédito ${loan.code} no está activo (estado: ${loan.status}).`);
+    }
+    if (cmp(dto.effectiveDate, toDateStr(loan.disbursementDate)) < 0) {
+      throw new BadRequestException('La fecha del pago no puede ser anterior al desembolso.');
+    }
+    const lastPayment = loan.payments[loan.payments.length - 1];
+    if (lastPayment && cmp(dto.effectiveDate, toDateStr(lastPayment.effectiveDate)) < 0) {
+      throw new BadRequestException(
+        `La fecha del pago no puede ser anterior al último pago registrado (${toDateStr(lastPayment.effectiveDate)}).`,
+      );
+    }
+
+    // 2. Ejecutar en motor financiero sobre los pagos vigentes
+    const ledger = this.buildLedger(loan, loan.payments);
+    const maxSeq = await this.prisma.paymentTransaction.aggregate({
+      where: { loanId: loan.id },
+      _max: { sequenceNumber: true },
+    });
+    const nextSeq = (maxSeq._max.sequenceNumber ?? 0) + 1;
+
     const result = ledger.apply({
       type: 'PAYMENT',
-      id: tempEventId,
+      id: `pending-${nextSeq}`,
       seq: nextSeq,
       date: dto.effectiveDate,
-      amount: dto.amount,
-      kind: dto.kind as any,
+      amount: D(dto.amount).toFixed(2),
+      kind: dto.kind,
       policy: dto.policy,
     });
 
-    // 4. Persistir atómicamente en PostgreSQL
-    const payment = await this.prisma.$transaction(async (tx) => {
-      const pCode = `PAG-${Date.now().toString().slice(-6)}`;
-      const newPayment = await tx.paymentTransaction.create({
-        data: {
-          code: pCode,
-          loanId: loan.id,
-          sequenceNumber: nextSeq,
-          effectiveDate: new Date(dto.effectiveDate),
-          amountReceived: D(dto.amount).toNumber(),
-          amountApplied: D(result.applied).toNumber(),
-          kind: dto.kind,
-          policy: dto.policy,
-          paymentMethod: dto.paymentMethod,
-          referenceNumber: dto.referenceNumber,
-          notes: dto.notes,
-          idempotencyKey: dto.idempotencyKey,
-          registeredById: dto.registeredById,
-          allocations: {
-            create: result.allocations.map((a) => ({
-              concept: a.concept as any,
-              installmentNumber: a.installmentNumber,
-              amount: D(a.amount).toNumber(),
-            })),
-          },
-        },
-        include: { allocations: true },
-      });
-
-      // Actualizar saldo de capital en Loan
-      await tx.loan.update({
-        where: { id: loan.id },
-        data: {
-          currentPrincipalBalance: D(ledger.balance).toNumber(),
-          status: ledger.balance === '0.00' ? 'PAID_OFF' : 'ACTIVE',
-        },
-      });
-
-      // Si hubo reprogramación (Abono extraordinario), crear nueva versión de contrato
-      if (result.rescheduled) {
-        const snap = ledger.snapshot(dto.effectiveDate);
-        await tx.loanContractVersion.create({
+    // 3. Persistir atómicamente
+    const payment = await withUniqueRetry(() =>
+      this.prisma.$transaction(async (tx) => {
+        const code = await nextSequentialCode(
+          (prefix) =>
+            tx.paymentTransaction.findFirst({ where: { code: { startsWith: prefix } }, orderBy: { code: 'desc' }, select: { code: true } }),
+          'PAG',
+        );
+        const newPayment = await tx.paymentTransaction.create({
           data: {
+            code,
             loanId: loan.id,
-            versionIndex: snap.versions.length - 1,
-            reason: 'PREPAYMENT',
+            sequenceNumber: nextSeq,
             effectiveDate: new Date(dto.effectiveDate),
-            principalBalance: D(ledger.balance).toNumber(),
-            monthlyRate: D(snap.current.monthlyRate).toNumber(),
-            levelPayment: snap.current.installments[0] ? D(snap.current.installments[0].payment).toNumber() : null,
-            policyApplied: dto.policy,
+            amountReceived: D(dto.amount).toFixed(2),
+            amountApplied: D(result.applied).toFixed(2),
+            kind: dto.kind,
+            policy: dto.policy,
+            paymentMethod: dto.paymentMethod,
+            referenceNumber: dto.referenceNumber,
+            notes: dto.notes,
+            idempotencyKey: dto.idempotencyKey,
+            registeredById: dto.registeredById,
+            allocations: {
+              create: result.allocations.map((a) => ({
+                concept: a.concept,
+                installmentNumber: a.installmentNumber,
+                amount: D(a.amount).toFixed(2),
+              })),
+            },
+          },
+          include: { allocations: true },
+        });
+
+        await tx.loan.update({
+          where: { id: loan.id },
+          data: {
+            currentPrincipalBalance: ledger.balance,
+            status: D(ledger.balance).isZero() ? LoanStatus.PAID_OFF : LoanStatus.ACTIVE,
           },
         });
-      }
 
-      return newPayment;
-    });
+        // Abono extraordinario con reprogramación: registrar nueva versión de contrato
+        if (result.rescheduled) {
+          const snap = ledger.snapshot(dto.effectiveDate);
+          const versionCount = await tx.loanContractVersion.count({ where: { loanId: loan.id } });
+          const nextInstallment = snap.current.installments.find((i) => i.status !== 'PAID');
+          await tx.loanContractVersion.create({
+            data: {
+              loanId: loan.id,
+              versionIndex: versionCount,
+              reason: 'PREPAYMENT',
+              effectiveDate: new Date(dto.effectiveDate),
+              principalBalance: ledger.balance,
+              monthlyRate: snap.current.monthlyRate,
+              levelPayment: nextInstallment ? nextInstallment.payment : null,
+              policyApplied: dto.policy,
+            },
+          });
+        }
+
+        return newPayment;
+      }),
+    );
 
     return {
       isDuplicate: false,
@@ -241,10 +242,9 @@ export class FinanceService {
     if (!payment) throw new NotFoundException('Pago no encontrado');
     if (payment.isReversed) throw new BadRequestException('El pago ya fue revertido con anterioridad');
 
-    const loanId = payment.loanId;
+    const loan = payment.loan;
 
     await this.prisma.$transaction(async (tx) => {
-      // 1. Marcar como revertido y crear registro auditable de reversión
       await tx.paymentTransaction.update({
         where: { id: paymentId },
         data: { isReversed: true },
@@ -253,51 +253,24 @@ export class FinanceService {
       await tx.paymentReversal.create({
         data: {
           paymentId,
-          reversalDate: new Date(),
+          reversalDate: new Date(todayInTz()),
           reason,
           authorizedById,
         },
       });
 
-      // 2. Reconstruir saldo a partir de los pagos válidos restantes
       const validPayments = await tx.paymentTransaction.findMany({
-        where: { loanId, isReversed: false },
+        where: { loanId: loan.id, isReversed: false },
         orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }],
       });
 
-      const loan = payment.loan;
-      const contract: LoanContract = {
-        principal: loan.originalPrincipal.toFixed(2),
-        monthlyRate: loan.monthlyRate.toString(),
-        termCount: loan.termCount,
-        startDate: toDateStr(loan.disbursementDate),
-        firstDueDate: toDateStr(loan.firstDueDate),
-        method: loan.method as any,
-        dayCount: loan.dayCount as any,
-        frequency: loan.frequency as any,
-        rounding: 'HALF_UP',
-        graceDays: loan.graceDays,
-        lateInterestMonthlyRate: loan.lateRateMonthly ? loan.lateRateMonthly.toString() : null,
-      };
-
-      const ledger = new LoanLedger(contract);
-      for (const p of validPayments) {
-        ledger.apply({
-          type: 'PAYMENT',
-          id: p.id,
-          seq: p.sequenceNumber,
-          date: toDateStr(p.effectiveDate),
-          amount: p.amountReceived.toFixed(2),
-          kind: p.kind as any,
-          policy: (p.policy as any) || undefined,
-        });
-      }
+      const ledger = this.buildLedger(loan, validPayments);
 
       await tx.loan.update({
-        where: { id: loanId },
+        where: { id: loan.id },
         data: {
-          currentPrincipalBalance: D(ledger.balance).toNumber(),
-          status: ledger.balance === '0.00' ? 'PAID_OFF' : 'ACTIVE',
+          currentPrincipalBalance: ledger.balance,
+          status: D(ledger.balance).isZero() ? LoanStatus.PAID_OFF : LoanStatus.ACTIVE,
         },
       });
     });

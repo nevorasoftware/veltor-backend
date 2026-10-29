@@ -1,4 +1,5 @@
 import { Injectable, UnauthorizedException, BadRequestException, NotFoundException } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import * as argon2 from 'argon2';
@@ -76,10 +77,37 @@ export class AuthService {
         role: true,
         phone: true,
         customerId: true,
+        mustChangePass: true,
         createdAt: true,
       },
     });
     if (!user) throw new NotFoundException('Usuario no encontrado');
     return user;
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.isActive) throw new NotFoundException('Usuario no encontrado');
+
+    const matches = await argon2.verify(user.passwordHash, currentPassword);
+    if (!matches) throw new BadRequestException('La contraseña actual no es correcta.');
+    if (currentPassword === newPassword) {
+      throw new BadRequestException('La nueva contraseña debe ser distinta a la actual.');
+    }
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: await argon2.hash(newPassword), mustChangePass: false },
+    });
+    return { success: true, message: 'Contraseña actualizada exitosamente.' };
+  }
+
+  /** Genera una contraseña temporal legible para entregar al cliente (se exige cambiarla al ingresar). */
+  static generateTemporaryPassword(): string {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    const bytes = randomBytes(12);
+    let out = '';
+    for (const b of bytes) out += alphabet[b % alphabet.length];
+    return out;
   }
 }

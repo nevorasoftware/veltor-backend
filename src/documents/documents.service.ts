@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DocumentCategory, DocumentStatus } from '@prisma/client';
 import * as fs from 'fs';
 import * as path from 'path';
+import { ALLOWED_DOCUMENT_MIME_TYPES, DOCUMENTS_UPLOAD_DIR } from './documents.constants';
 
 export interface UploadDocumentDto {
   customerId: string;
@@ -23,7 +24,7 @@ export interface UpdateDocumentStatusDto {
 @Injectable()
 export class DocumentsService {
   private readonly logger = new Logger(DocumentsService.name);
-  private readonly uploadDir = path.resolve(process.cwd(), 'uploads', 'documents');
+  private readonly uploadDir = DOCUMENTS_UPLOAD_DIR;
 
   constructor(private readonly prisma: PrismaService) {
     if (!fs.existsSync(this.uploadDir)) {
@@ -38,6 +39,9 @@ export class DocumentsService {
     if (!file) {
       throw new BadRequestException('Archivo no adjunto o inválido');
     }
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.includes(file.mimetype)) {
+      throw new BadRequestException('Tipo de archivo no permitido. Use PDF, JPG, PNG o WEBP.');
+    }
 
     const customer = await this.prisma.customer.findUnique({
       where: { id: dto.customerId },
@@ -49,10 +53,7 @@ export class DocumentsService {
     // Generar nombre seguro de archivo
     const timestamp = Date.now();
     const ext = path.extname(file.originalname).toLowerCase();
-    const safeBaseName = path
-      .basename(file.originalname, ext)
-      .replace(/[^a-zA-Z0-9_-]/g, '_');
-    const storedFileName = `${customer.code}_${dto.category}_${timestamp}${ext}`;
+    const storedFileName = `${customer.code}_${dto.category}_${timestamp}_${Math.floor(Math.random() * 1e6)}${ext}`;
     const filePath = path.join(this.uploadDir, storedFileName);
 
     // Guardar archivo en disco

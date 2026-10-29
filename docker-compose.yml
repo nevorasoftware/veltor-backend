@@ -1,0 +1,15 @@
+# PostgreSQL para desarrollo local (opcional)
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: veltor_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - veltor_pgdata:/var/lib/postgresql/data
+
+volumes:
+  veltor_pgdata:

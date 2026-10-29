@@ -1,88 +1,26 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
-import Decimal from 'decimal.js';
-import { generateSchedule } from '../finance/engine';
+import { FinanceService } from '../finance/finance.service';
 
 @Injectable()
 export class PdfService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly financeService: FinanceService) {}
 
-  async generateAmortizationSchedulePdf(loanId: string): Promise<Buffer> {
-    const loan = await this.prisma.loan.findFirst({
-      where: {
-        OR: [{ id: loanId }, { code: loanId }],
-      },
-      include: {
-        customer: true,
-        vehicle: true,
-        installments: {
-          orderBy: { number: 'asc' },
-        },
-      },
-    });
-
-    if (!loan) {
-      throw new NotFoundException(`Crédito con ID o código ${loanId} no encontrado`);
-    }
-
-    let installmentsToRender: any[] = loan.installments;
-
-    if (!installmentsToRender || installmentsToRender.length === 0) {
-      try {
-        const startDateStr = (loan.disbursementDate ? new Date(loan.disbursementDate) : new Date())
-          .toISOString()
-          .split('T')[0];
-        const firstDueDateStr = (loan.firstDueDate ? new Date(loan.firstDueDate) : new Date())
-          .toISOString()
-          .split('T')[0];
-        const generated = generateSchedule({
-          principal: new Decimal(loan.originalPrincipal),
-          monthlyRate: new Decimal(loan.monthlyRate),
-          dayCount: (loan.dayCount as any) || 'D30_360',
-          frequency: (loan.frequency as any) || 'MONTHLY',
-          rounding: 'HALF_UP',
-          method: (loan.method as any) || 'FRENCH',
-          startDate: startDateStr,
-          startNumber: 1,
-          anchorDate: firstDueDateStr,
-          anchorNumber: 1,
-          count: loan.termCount || 36,
-        });
-
-        installmentsToRender = generated.installments.map((inst) => ({
-          number: inst.number,
-          dueDate: new Date(inst.dueDate),
-          openingBalance: inst.openingBalance.toNumber(),
-          scheduledPrincipal: inst.principal.toNumber(),
-          scheduledInterest: inst.interest.toNumber(),
-          scheduledPayment: inst.payment.toNumber(),
-          closingBalance: inst.closingBalance.toNumber(),
-          status: 'PENDING',
-        }));
-
-        this.prisma.amortizationInstallment
-          .createMany({
-            data: installmentsToRender.map((inst) => ({
-              loanId: loan.id,
-              versionIndex: 0,
-              number: inst.number,
-              dueDate: inst.dueDate,
-              periodStart: new Date(startDateStr),
-              openingBalance: inst.openingBalance,
-              scheduledPrincipal: inst.scheduledPrincipal,
-              scheduledInterest: inst.scheduledInterest,
-              scheduledPayment: inst.scheduledPayment,
-              closingBalance: inst.closingBalance,
-              status: 'PENDING',
-            })),
-            skipDuplicates: true,
-          })
-          .catch(() => {});
-      } catch (e) {
-        installmentsToRender = [];
-      }
-    }
+  /** `scope` restringe el crédito (p. ej. al cliente autenticado en el portal). */
+  async generateAmortizationSchedulePdf(loanId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
+    // La tabla se toma del motor financiero: refleja abonos extraordinarios y estado real de cada cuota
+    const { loan, snapshot } = await this.financeService.getLoanLedgerSnapshot(loanId, undefined, scope);
+    const installmentsToRender = snapshot.current.installments.map((inst) => ({
+      number: inst.number,
+      dueDate: new Date(inst.dueDate),
+      openingBalance: inst.openingBalance,
+      scheduledPrincipal: inst.principal,
+      scheduledInterest: inst.interest,
+      scheduledPayment: inst.payment,
+      closingBalance: inst.closingBalance,
+      status: inst.status,
+    }));
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({ margin: 36, size: 'LETTER' });
@@ -214,28 +152,11 @@ export class PdfService {
     });
   }
 
-  async generateAccountStatementPdf(loanId: string): Promise<Buffer> {
-    const loan = await this.prisma.loan.findFirst({
-      where: {
-        OR: [{ id: loanId }, { code: loanId }],
-      },
-      include: {
-        customer: true,
-        vehicle: true,
-        payments: {
-          where: { isReversed: false },
-          orderBy: { effectiveDate: 'desc' },
-          include: { allocations: true },
-        },
-        installments: {
-          orderBy: { number: 'asc' },
-        },
-      },
-    });
-
-    if (!loan) {
-      throw new NotFoundException(`Crédito con ID o código ${loanId} no encontrado`);
-    }
+  async generateAccountStatementPdf(loanId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
+    const { loan: rawLoan, snapshot } = await this.financeService.getLoanLedgerSnapshot(loanId, undefined, scope);
+    // Historial de pagos del más reciente al más antiguo
+    const loan = { ...rawLoan, payments: [...rawLoan.payments].reverse() };
+    const nextPending = snapshot.current.installments.find((i) => i.status !== 'PAID');
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({ margin: 36, size: 'LETTER' });
@@ -290,12 +211,11 @@ export class PdfService {
       doc.text(`Estado del Crédito: ${loan.status}`, 46, boxTop + 66);
 
       const totalPaid = loan.payments.reduce((acc, p) => acc + Number(p.amountApplied), 0);
-      const nextPending = loan.installments.find((i) => i.status === 'PENDING');
 
       doc.text(`Monto Inicial: $${Number(loan.originalPrincipal).toFixed(2)}`, 310, boxTop + 24);
-      doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: $${Number(loan.currentPrincipalBalance).toFixed(2)}`, 310, boxTop + 38);
+      doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: $${Number(snapshot.principalBalance).toFixed(2)}`, 310, boxTop + 38);
       doc.font('Helvetica').fillColor(colorGraphite).text(`Total Abonado a la Fecha: $${totalPaid.toFixed(2)}`, 310, boxTop + 52);
-      doc.text(`Próxima Cuota: ${nextPending ? `$${Number(nextPending.scheduledPayment).toFixed(2)} (${new Date(nextPending.dueDate).toISOString().split('T')[0]})` : 'Al día'}`, 310, boxTop + 66);
+      doc.text(`Próxima Cuota: ${nextPending ? `$${Number(nextPending.payment).toFixed(2)} (${nextPending.dueDate})` : 'Crédito cancelado'}`, 310, boxTop + 66);
 
       // Tabla de Historial de Pagos Recientes
       let currentY = boxTop + 105;

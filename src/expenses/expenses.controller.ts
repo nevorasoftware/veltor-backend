@@ -1,9 +1,10 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, HttpCode, HttpStatus, Request } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { ExpensesService } from './expenses.service';
 import { CreateExpenseDto, UpdateExpenseDto, QueryExpenseDto } from './dto/expense.dto';
 
 @ApiTags('Control de Gastos y Contabilidad')
+@ApiBearerAuth()
 @Controller('expenses')
 export class ExpensesController {
   constructor(private readonly expensesService: ExpensesService) {}
@@ -30,8 +31,8 @@ export class ExpensesController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Registrar un nuevo gasto (producto o servicio) en la contabilidad' })
-  async create(@Body() dto: CreateExpenseDto) {
-    return this.expensesService.create(dto);
+  async create(@Body() dto: CreateExpenseDto, @Request() req: any) {
+    return this.expensesService.create(dto, req.user.id);
   }
 
   @Put(':id')

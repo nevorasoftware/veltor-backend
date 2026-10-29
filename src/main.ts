@@ -4,9 +4,13 @@ import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { json, urlencoded } from 'express';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // Railway publica la API detrás de un proxy: necesario para que el rate limiting use la IP real
+  app.set('trust proxy', 1);
 
   // Límite de carga para expedientes documentales y fotos de alta resolución (hasta 50MB)
   app.use(json({ limit: '50mb' }));
@@ -20,21 +24,8 @@ async function bootstrap() {
     }),
   );
 
-  // CORS configurable
-  const allowedOrigins = process.env.CORS_ORIGIN
-    ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-    : ['http://localhost:5173', 'http://localhost:3000', 'https://veltor.up.railway.app', 'https://veltor-backend-production.up.railway.app'];
-
-  app.enableCors({
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-        callback(null, true);
-      } else {
-        callback(null, true); // Permite acceso en modo desarrollo
-      }
-    },
-    credentials: true,
-  });
+  // CORS abierto: la API se autentica con Bearer token (no cookies), así que no hay riesgo de CSRF.
+  app.enableCors({ origin: true });
 
   // Prefijo global de API
   const apiPrefix = process.env.API_PREFIX || 'api/v1';

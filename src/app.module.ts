@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
@@ -11,6 +13,8 @@ import { DocumentsModule } from './documents/documents.module';
 import { PdfModule } from './pdf/pdf.module';
 import { SettingsModule } from './settings/settings.module';
 import { ExpensesModule } from './expenses/expenses.module';
+import { PortalModule } from './portal/portal.module';
+import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -19,6 +23,12 @@ import { HealthController } from './health/health.controller';
       isGlobal: true,
       envFilePath: ['.env', '.env.local'],
     }),
+    ThrottlerModule.forRoot([
+      {
+        ttl: Number(process.env.THROTTLE_TTL || 60) * 1000,
+        limit: Number(process.env.THROTTLE_LIMIT || 300),
+      },
+    ]),
     PrismaModule,
     AuthModule,
     VehiclesModule,
@@ -30,7 +40,10 @@ import { HealthController } from './health/health.controller';
     PdfModule,
     SettingsModule,
     ExpensesModule,
+    PortalModule,
+    BootstrapModule,
   ],
   controllers: [HealthController],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

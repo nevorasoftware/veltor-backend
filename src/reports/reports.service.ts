@@ -1,14 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { VehicleStatus, LoanStatus, LeadStatus } from '@prisma/client';
+import { VehicleStatus, LoanStatus, LeadStatus, CustomerStatus } from '@prisma/client';
+import { todayInTz } from '../finance/engine';
 
 @Injectable()
 export class ReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getDashboardMetrics() {
-    const today = new Date();
-    const firstDayMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    // Inicio del mes en la zona horaria del negocio (effectiveDate es una fecha sin hora)
+    const firstDayMonth = new Date(`${todayInTz().slice(0, 7)}-01`);
 
     const [
       availableVehicles,
@@ -24,7 +25,7 @@ export class ReportsService {
       this.prisma.vehicle.count({ where: { status: VehicleStatus.RESERVED } }),
       this.prisma.vehicle.count({ where: { status: VehicleStatus.SOLD } }),
       this.prisma.lead.count({ where: { status: LeadStatus.NEW } }),
-      this.prisma.customer.count({ where: { status: 'ACTIVE' } }),
+      this.prisma.customer.count({ where: { status: CustomerStatus.ACTIVE } }),
       this.prisma.loan.count({ where: { status: LoanStatus.ACTIVE } }),
       this.prisma.loan.aggregate({
         where: { status: LoanStatus.ACTIVE },
@@ -69,7 +70,6 @@ export class ReportsService {
         vehicle: { select: { id: true, code: true, brand: true, model: true, year: true } },
       },
       orderBy: { createdAt: 'desc' },
-      take: 20,
     });
   }
 }

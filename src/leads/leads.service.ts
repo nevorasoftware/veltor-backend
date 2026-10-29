@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   LeadStatus,
@@ -9,22 +9,42 @@ import {
   VehicleStatus,
   LoanStatus,
   PaymentFrequency,
-  DayCountBasis,
-  AmortizationMethod,
+  InstallmentStatus,
 } from '@prisma/client';
-import { IsNotEmpty, IsString, IsEmail, IsOptional, IsNumber, IsBoolean, IsArray } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsEmail,
+  IsEnum,
+  IsInt,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+  ValidateNested,
+} from 'class-validator';
 import * as fs from 'fs';
 import * as path from 'path';
 import Decimal from 'decimal.js';
-import { generateSchedule } from '../finance/engine';
+import { generateSchedule, todayInTz, addMonths, fmt } from '../finance/engine';
+import { nextSequentialCode, withUniqueRetry } from '../common/codes';
+import { ALLOWED_DOCUMENT_MIME_TYPES, DOCUMENTS_UPLOAD_DIR, MAX_DOCUMENT_BYTES } from '../documents/documents.constants';
 
 export class CreateLeadDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(150)
   fullName!: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(30)
   phone!: string;
 
   @IsEmail()
@@ -32,8 +52,10 @@ export class CreateLeadDto {
 
   @IsString()
   @IsOptional()
+  @MaxLength(2000)
   message?: string;
 
+  @IsEnum(LeadSource)
   @IsOptional()
   source?: LeadSource;
 
@@ -41,11 +63,16 @@ export class CreateLeadDto {
   @IsOptional()
   vehicleId?: string;
 
+  @Type(() => Number)
   @IsNumber()
+  @Min(0)
   @IsOptional()
   estimatedDown?: number;
 
-  @IsNumber()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(120)
   @IsOptional()
   termMonths?: number;
 
@@ -66,6 +93,7 @@ export class UpdateLeadDto {
   @IsOptional()
   email?: string;
 
+  @IsEnum(LeadStatus)
   @IsOptional()
   status?: LeadStatus;
 
@@ -77,11 +105,16 @@ export class UpdateLeadDto {
   @IsOptional()
   vehicleId?: string;
 
+  @Type(() => Number)
   @IsNumber()
+  @Min(0)
   @IsOptional()
   estimatedDown?: number;
 
-  @IsNumber()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(120)
   @IsOptional()
   termMonths?: number;
 
@@ -90,52 +123,90 @@ export class UpdateLeadDto {
   assignedToUserId?: string;
 }
 
-export interface DocumentUploadInput {
-  category: DocumentCategory;
-  fileName: string;
-  mimeType: string;
-  contentBase64: string;
+export class UpdateLeadStatusDto {
+  @IsEnum(LeadStatus)
+  status!: LeadStatus;
+
+  @IsString()
+  @IsOptional()
+  internalNotes?: string;
+
+  @IsString()
+  @IsOptional()
+  assignedToUserId?: string;
+}
+
+export class DocumentUploadInput {
+  @IsEnum(DocumentCategory)
+  category!: DocumentCategory;
+
+  @IsString()
+  @IsNotEmpty()
+  fileName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  mimeType!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  contentBase64!: string;
+
+  @IsString()
+  @IsOptional()
   title?: string;
 }
 
 export class ConvertLeadToLoanDto {
-  @IsString()
-  @IsNotEmpty()
+  @Matches(/^\d{8}-\d$/, { message: 'El DUI debe tener el formato 00000000-0' })
   dui!: string;
 
-  @IsString()
-  @IsNotEmpty()
+  @Matches(/^(\d{8}-\d|\d{4}-\d{6}-\d{3}-\d)$/, {
+    message: 'El NIT debe tener el formato 00000000-0 o 0000-000000-000-0',
+  })
   nit!: string;
 
   @IsString()
-  @IsOptional()
-  address?: string;
+  @IsNotEmpty({ message: 'La dirección del cliente es obligatoria' })
+  address!: string;
 
   @IsString()
-  @IsOptional()
-  economicActivity?: string;
+  @IsNotEmpty({ message: 'La actividad económica del cliente es obligatoria' })
+  economicActivity!: string;
 
+  @Type(() => Number)
   @IsNumber()
-  @IsOptional()
-  monthlyIncome?: number;
+  @Min(1, { message: 'El ingreso mensual debe ser mayor a cero' })
+  monthlyIncome!: number;
 
   @IsString()
   @IsOptional()
   vehicleId?: string;
 
+  @Type(() => Number)
   @IsNumber()
+  @Min(0)
   @IsOptional()
   downPayment?: number;
 
-  @IsNumber()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(120)
   @IsOptional()
   termMonths?: number;
 
+  @Type(() => Number)
   @IsNumber()
+  @Min(0)
+  @Max(0.1)
   @IsOptional()
   monthlyRate?: number;
 
   @IsArray()
+  @ArrayMinSize(5)
+  @ValidateNested({ each: true })
+  @Type(() => DocumentUploadInput)
   documents!: DocumentUploadInput[];
 
   @IsString()
@@ -143,14 +214,19 @@ export class ConvertLeadToLoanDto {
   notes?: string;
 }
 
+const INCOME_CATEGORIES: DocumentCategory[] = [
+  DocumentCategory.PAYSLIP,
+  DocumentCategory.BANK_STATEMENT,
+  DocumentCategory.TAX_RETURN,
+];
+
 @Injectable()
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
-  private readonly uploadDir = path.resolve(process.cwd(), 'uploads', 'documents');
 
   constructor(private readonly prisma: PrismaService) {
-    if (!fs.existsSync(this.uploadDir)) {
-      fs.mkdirSync(this.uploadDir, { recursive: true });
+    if (!fs.existsSync(DOCUMENTS_UPLOAD_DIR)) {
+      fs.mkdirSync(DOCUMENTS_UPLOAD_DIR, { recursive: true });
     }
   }
 
@@ -159,32 +235,34 @@ export class LeadsService {
       throw new BadRequestException('Debe aceptar el aviso de privacidad y consentimiento para tratamiento de datos.');
     }
 
-    const code = `PROS-${Date.now().toString().slice(-6)}`;
+    if (dto.vehicleId) {
+      const exists = await this.prisma.vehicle.count({ where: { id: dto.vehicleId, isPublished: true } });
+      if (!exists) throw new BadRequestException('El vehículo seleccionado no está disponible.');
+    }
 
-    return this.prisma.lead.create({
-      data: {
-        code,
-        fullName: dto.fullName,
-        phone: dto.phone,
-        email: dto.email,
-        message: dto.message,
-        source: dto.source || LeadSource.CATALOG_REQUEST,
-        status: LeadStatus.NEW,
-        vehicleId: dto.vehicleId,
-        estimatedDown: dto.estimatedDown,
-        termMonths: dto.termMonths,
-        privacyAccepted: dto.privacyAccepted,
-      },
-      include: {
-        vehicle: {
-          select: {
-            brand: true,
-            model: true,
-            year: true,
-            salePrice: true,
-          },
+    return withUniqueRetry(async () => {
+      const code = await nextSequentialCode(
+        (prefix) =>
+          this.prisma.lead.findFirst({ where: { code: { startsWith: prefix } }, orderBy: { code: 'desc' }, select: { code: true } }),
+        'PROS',
+      );
+      const lead = await this.prisma.lead.create({
+        data: {
+          code,
+          fullName: dto.fullName.trim(),
+          phone: dto.phone.trim(),
+          email: dto.email.toLowerCase().trim(),
+          message: dto.message,
+          source: dto.source || LeadSource.CATALOG_REQUEST,
+          status: LeadStatus.NEW,
+          vehicleId: dto.vehicleId,
+          estimatedDown: dto.estimatedDown,
+          termMonths: dto.termMonths,
+          privacyAccepted: dto.privacyAccepted,
         },
-      },
+      });
+      // Respuesta pública mínima: no se devuelven datos internos
+      return { code: lead.code, createdAt: lead.createdAt };
     });
   }
 
@@ -192,9 +270,7 @@ export class LeadsService {
     const where = status ? { status } : {};
     return this.prisma.lead.findMany({
       where,
-      include: {
-        vehicle: true,
-      },
+      include: { vehicle: { include: { images: { where: { isPrimary: true }, take: 1 } } } },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -202,79 +278,40 @@ export class LeadsService {
   async findOne(id: string) {
     const lead = await this.prisma.lead.findUnique({
       where: { id },
-      include: {
-        vehicle: true,
-      },
+      include: { vehicle: true },
     });
     if (!lead) throw new NotFoundException('Prospecto no encontrado');
     return lead;
   }
 
   async updateLead(id: string, dto: UpdateLeadDto) {
-    const lead = await this.prisma.lead.findUnique({ where: { id } });
-    if (!lead) throw new NotFoundException('Prospecto no encontrado');
+    await this.findOne(id);
 
     return this.prisma.lead.update({
       where: { id },
       data: {
-        fullName: dto.fullName ?? lead.fullName,
-        phone: dto.phone ?? lead.phone,
-        email: dto.email ?? lead.email,
-        status: dto.status ?? lead.status,
-        internalNotes: dto.internalNotes ?? lead.internalNotes,
-        vehicleId: dto.vehicleId ?? lead.vehicleId,
-        estimatedDown: dto.estimatedDown !== undefined ? dto.estimatedDown : lead.estimatedDown,
-        termMonths: dto.termMonths ?? lead.termMonths,
-        assignedToUserId: dto.assignedToUserId ?? lead.assignedToUserId,
+        fullName: dto.fullName,
+        phone: dto.phone,
+        email: dto.email?.toLowerCase().trim(),
+        status: dto.status,
+        internalNotes: dto.internalNotes,
+        vehicleId: dto.vehicleId,
+        estimatedDown: dto.estimatedDown,
+        termMonths: dto.termMonths,
+        assignedToUserId: dto.assignedToUserId,
       },
-      include: {
-        vehicle: true,
-      },
-    });
-  }
-
-  async updateStatus(id: string, status: LeadStatus, internalNotes?: string, assignedToUserId?: string) {
-    return this.updateLead(id, { status, internalNotes, assignedToUserId });
-  }
-
-  /**
-   * Formaliza un prospecto convirtiéndolo en un Crédito Activo oficial.
-   * Requiere cargar obligatoriamente los 4 documentos del cliente:
-   * 1. DUI
-   * 2. NIT
-   * 3. Licencia de Conducir
-   * 4. Comprobante de Ingresos
-   */
-  async convertLeadToLoan(leadId: string, dto: ConvertLeadToLoanDto) {
-    const lead = await this.prisma.lead.findUnique({
-      where: { id: leadId },
       include: { vehicle: true },
     });
-    if (!lead) throw new NotFoundException('Prospecto no encontrado');
+  }
 
-    // 1. Validar documentos obligatorios (5 requeridos)
-    if (!dto.documents || !Array.isArray(dto.documents) || dto.documents.length < 5) {
-      throw new BadRequestException(
-        'Para formalizar a Crédito Activo es obligatorio adjuntar los 5 documentos del cliente: DUI, NIT, Licencia de Conducir, Comprobante de Ingresos y Recibo de Agua o Luz.',
-      );
-    }
-
-    const categories = dto.documents.map((d) => d.category);
-    const hasDui = categories.includes(DocumentCategory.DUI_FRONT) || categories.includes(DocumentCategory.DUI_BACK);
-    const hasNit = categories.includes(DocumentCategory.NIT);
-    const hasLicense = categories.includes(DocumentCategory.DRIVER_LICENSE);
-    const hasIncome =
-      categories.includes(DocumentCategory.PAYSLIP) ||
-      categories.includes(DocumentCategory.BANK_STATEMENT) ||
-      categories.includes(DocumentCategory.TAX_RETURN);
-    const hasUtility = categories.includes(DocumentCategory.UTILITY_BILL);
-
+  private validateDocuments(documents: DocumentUploadInput[]) {
+    const categories = documents.map((d) => d.category);
     const missingDocs: string[] = [];
-    if (!hasDui) missingDocs.push('DUI');
-    if (!hasNit) missingDocs.push('NIT');
-    if (!hasLicense) missingDocs.push('Licencia de Conducir');
-    if (!hasIncome) missingDocs.push('Comprobante de Ingresos');
-    if (!hasUtility) missingDocs.push('Recibo de Agua o Luz (Comprobante de Domicilio)');
+    if (!categories.includes(DocumentCategory.DUI_FRONT) && !categories.includes(DocumentCategory.DUI_BACK)) missingDocs.push('DUI');
+    if (!categories.includes(DocumentCategory.NIT)) missingDocs.push('NIT');
+    if (!categories.includes(DocumentCategory.DRIVER_LICENSE)) missingDocs.push('Licencia de Conducir');
+    if (!categories.some((c) => INCOME_CATEGORIES.includes(c))) missingDocs.push('Comprobante de Ingresos');
+    if (!categories.includes(DocumentCategory.UTILITY_BILL)) missingDocs.push('Recibo de Agua o Luz (Comprobante de Domicilio)');
 
     if (missingDocs.length > 0) {
       throw new BadRequestException(
@@ -282,231 +319,254 @@ export class LeadsService {
       );
     }
 
-    // 2. Resolver Vehículo
-    const vehicleId = dto.vehicleId || lead.vehicleId;
-    let vehicle = vehicleId ? await this.prisma.vehicle.findUnique({ where: { id: vehicleId } }) : null;
-    if (!vehicle) {
-      // Tomar primer vehículo disponible si no hay seleccionado
-      vehicle = await this.prisma.vehicle.findFirst({
-        where: { status: VehicleStatus.AVAILABLE },
-      });
-      if (!vehicle) {
-        vehicle = await this.prisma.vehicle.findFirst();
+    return documents.map((doc) => {
+      if (!ALLOWED_DOCUMENT_MIME_TYPES.includes(doc.mimeType)) {
+        throw new BadRequestException(`Tipo de archivo no permitido para ${doc.fileName}. Use PDF, JPG, PNG o WEBP.`);
       }
-    }
-    if (!vehicle) {
-      throw new BadRequestException('No hay vehículos registrados para vincular al crédito.');
-    }
-
-    // 3. Resolver o Crear Cliente
-    let customer = await this.prisma.customer.findFirst({
-      where: {
-        OR: [{ dui: dto.dui }, { email: lead.email }],
-      },
+      const buffer = Buffer.from(doc.contentBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+      if (buffer.length === 0) throw new BadRequestException(`El archivo ${doc.fileName} está vacío o es inválido.`);
+      if (buffer.length > MAX_DOCUMENT_BYTES) {
+        throw new BadRequestException(`El archivo ${doc.fileName} supera el tamaño máximo de 10 MB.`);
+      }
+      return { ...doc, buffer };
     });
+  }
 
-    if (!customer) {
-      const customerCode = `CLI-${Date.now().toString().slice(-5)}`;
-      customer = await this.prisma.customer.create({
-        data: {
-          code: customerCode,
-          fullName: lead.fullName,
-          dui: dto.dui,
-          nit: dto.nit,
-          phone: lead.phone,
-          email: lead.email,
-          address: dto.address || 'San Salvador, El Salvador',
-          economicActivity: dto.economicActivity || 'Empleado / Profesional',
-          monthlyIncome: dto.monthlyIncome || 1800.0,
-          status: CustomerStatus.ACTIVE,
-          internalNotes: `Cliente formalizado a partir del prospecto ${lead.code}`,
-        },
-      });
-    } else {
-      customer = await this.prisma.customer.update({
-        where: { id: customer.id },
-        data: {
-          status: CustomerStatus.ACTIVE,
-          dui: dto.dui || customer.dui,
-          nit: dto.nit || customer.nit,
-          address: dto.address || customer.address,
-          economicActivity: dto.economicActivity || customer.economicActivity,
-          monthlyIncome: dto.monthlyIncome || customer.monthlyIncome,
-        },
-      });
+  /**
+   * Formaliza un prospecto convirtiéndolo en un Crédito Activo.
+   * Requiere los 5 documentos del cliente: DUI, NIT, Licencia, Comprobante de Ingresos y Recibo de servicio.
+   * Toda la operación es atómica: si algo falla no queda cliente, crédito ni archivo a medias.
+   */
+  async convertLeadToLoan(leadId: string, dto: ConvertLeadToLoanDto) {
+    const lead = await this.prisma.lead.findUnique({ where: { id: leadId } });
+    if (!lead) throw new NotFoundException('Prospecto no encontrado');
+    if (lead.status === LeadStatus.CONVERTED) {
+      throw new ConflictException('Este prospecto ya fue formalizado a crédito.');
     }
 
-    // 4. Guardar los 4 documentos físicos y en base de datos
-    for (const doc of dto.documents) {
-      const cleanBase64 = doc.contentBase64.replace(/^data:[^;]+;base64,/, '');
-      const fileBuffer = Buffer.from(cleanBase64, 'base64');
-      const ext = path.extname(doc.fileName) || (doc.mimeType?.includes('pdf') ? '.pdf' : '.jpg');
-      const storedFileName = `${customer.code}_${doc.category}_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`;
-      const filePath = path.join(this.uploadDir, storedFileName);
+    const documents = this.validateDocuments(dto.documents);
 
-      await fs.promises.writeFile(filePath, fileBuffer);
-
-      await this.prisma.customerDocument.create({
-        data: {
-          customerId: customer.id,
-          category: doc.category,
-          title: doc.title || `${doc.category} - ${doc.fileName}`,
-          fileKey: storedFileName,
-          fileName: doc.fileName,
-          mimeType: doc.mimeType || 'application/octet-stream',
-          fileSizeBytes: fileBuffer.length,
-          status: DocumentStatus.APPROVED,
-          notes: 'Documento validado en formalización de crédito desde prospecto',
-        },
-      });
+    // Vehículo: obligatorio y disponible (nunca se asigna uno arbitrario)
+    const vehicleId = dto.vehicleId || lead.vehicleId;
+    if (!vehicleId) throw new BadRequestException('Debe seleccionar el vehículo a financiar.');
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle) throw new BadRequestException('El vehículo seleccionado no existe.');
+    if (vehicle.status !== VehicleStatus.AVAILABLE && vehicle.status !== VehicleStatus.RESERVED) {
+      throw new BadRequestException(`El vehículo ${vehicle.brand} ${vehicle.model} no está disponible para financiar.`);
     }
 
-    // 5. Resolver Producto Financiero
-    let product = await this.prisma.financingProduct.findFirst({
+    const product = await this.prisma.financingProduct.findFirst({
       where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
     });
-    if (!product) {
-      product = await this.prisma.financingProduct.create({
-        data: {
-          code: 'PROD-AUTO-ESTANDAR',
-          name: 'Crédito Vehicular Estándar VELTOR',
-          minMonthlyRate: 0.012,
-          maxMonthlyRate: 0.022,
-          defaultMonthlyRate: 0.015,
-          minTermMonths: 12,
-          maxTermMonths: 72,
-          minDownPercent: 15.0,
-          dayCountBasis: DayCountBasis.D30_360,
-          method: AmortizationMethod.FRENCH,
-          graceDays: 5,
-        },
-      });
+    if (!product) throw new BadRequestException('No hay un producto financiero activo configurado.');
+
+    // Parámetros del crédito
+    const vehiclePrice = new Decimal(vehicle.salePrice.toString());
+    const downPayment = new Decimal(
+      dto.downPayment ?? (lead.estimatedDown !== null ? lead.estimatedDown.toString() : vehicle.minDownPayment.toString()),
+    );
+    if (downPayment.gte(vehiclePrice)) {
+      throw new BadRequestException('La prima debe ser menor al precio del vehículo.');
     }
+    const minDown = vehiclePrice.mul(product.minDownPercent.toString()).div(100).toDecimalPlaces(2);
+    if (downPayment.lt(minDown)) {
+      throw new BadRequestException(
+        `La prima mínima para este producto es ${product.minDownPercent.toString()}% (${fmt(minDown)} USD).`,
+      );
+    }
+    const principal = vehiclePrice.minus(downPayment).toDecimalPlaces(2);
 
-    // 6. Parámetros del Crédito
-    const vehiclePrice = Number(vehicle.salePrice);
-    const downPayment =
-      dto.downPayment !== undefined
-        ? Number(dto.downPayment)
-        : lead.estimatedDown !== null
-        ? Number(lead.estimatedDown)
-        : Math.round(vehiclePrice * 0.15);
-    const principal = Math.max(100, vehiclePrice - downPayment);
-    const termCount = dto.termMonths || lead.termMonths || 36;
-    const monthlyRate =
-      dto.monthlyRate !== undefined && dto.monthlyRate !== null
-        ? Number(dto.monthlyRate)
-        : Number(product.defaultMonthlyRate);
+    const termCount = dto.termMonths ?? lead.termMonths ?? product.minTermMonths;
+    if (termCount < product.minTermMonths || termCount > product.maxTermMonths) {
+      throw new BadRequestException(
+        `El plazo debe estar entre ${product.minTermMonths} y ${product.maxTermMonths} meses.`,
+      );
+    }
+    const monthlyRate = new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString());
 
-    // Cálculo de cuota nivelada francesa exacta
-    const i = monthlyRate;
-    const n = termCount;
-    const cuota = i === 0 ? principal / n : (principal * i) / (1 - Math.pow(1 + i, -n));
+    const disbursementDate = todayInTz();
+    const firstDueDate = addMonths(disbursementDate, 1);
 
-    // Fechas
-    const today = new Date();
-    const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
-    const loanCode = `CRE-2026-${Math.floor(Math.random() * 9000) + 1000}`;
-
-    // 7. Crear el Crédito Activo
-    const loan = await this.prisma.loan.create({
-      data: {
-        code: loanCode,
-        customerId: customer.id,
-        vehicleId: vehicle.id,
-        productId: product.id,
-        vehiclePrice,
-        downPayment,
-        financedFees: 0.0,
-        originalPrincipal: principal,
-        currentPrincipalBalance: principal,
-        monthlyRate,
-        termCount,
-        frequency: PaymentFrequency.MONTHLY,
-        dayCount: DayCountBasis.D30_360,
-        method: AmortizationMethod.FRENCH,
-        graceDays: 5,
-        disbursementDate: today,
-        firstDueDate: nextMonth,
-        status: LoanStatus.ACTIVE,
-      },
-      include: {
-        customer: true,
-        vehicle: true,
-      },
+    const schedule = generateSchedule({
+      principal,
+      monthlyRate,
+      dayCount: product.dayCountBasis,
+      frequency: 'MONTHLY',
+      rounding: 'HALF_UP',
+      method: product.method,
+      startDate: disbursementDate,
+      startNumber: 1,
+      anchorDate: firstDueDate,
+      anchorNumber: 1,
+      count: termCount,
     });
 
-    // 8. Crear Versión de Contrato
-    await this.prisma.loanContractVersion.create({
-      data: {
-        loanId: loan.id,
-        versionIndex: 0,
-        reason: 'ORIGINAL',
-        effectiveDate: today,
-        principalBalance: principal,
-        monthlyRate,
-        levelPayment: Number(cuota.toFixed(2)),
-      },
-    });
+    // Guardar archivos primero; se eliminan si la transacción falla
+    const writtenFiles: string[] = [];
+    const storedDocs: { doc: (typeof documents)[number]; storedFileName: string }[] = [];
 
-    // 8.5. Generar y persistir cuotas de amortización en base de datos
     try {
-      const generated = generateSchedule({
-        principal: new Decimal(principal),
-        monthlyRate: new Decimal(monthlyRate),
-        dayCount: 'D30_360',
-        frequency: 'MONTHLY',
-        rounding: 'HALF_UP',
-        method: 'FRENCH',
-        startDate: today.toISOString().split('T')[0],
-        startNumber: 1,
-        anchorDate: nextMonth.toISOString().split('T')[0],
-        anchorNumber: 1,
-        count: termCount,
-      });
+      for (const doc of documents) {
+        const ext = path.extname(doc.fileName).toLowerCase() || (doc.mimeType.includes('pdf') ? '.pdf' : '.jpg');
+        const storedFileName = `${leadId}_${doc.category}_${Date.now()}_${Math.floor(Math.random() * 1e6)}${ext}`;
+        const filePath = path.join(DOCUMENTS_UPLOAD_DIR, storedFileName);
+        await fs.promises.writeFile(filePath, doc.buffer);
+        writtenFiles.push(filePath);
+        storedDocs.push({ doc, storedFileName });
+      }
 
-      await this.prisma.amortizationInstallment.createMany({
-        data: generated.installments.map((inst) => ({
-          loanId: loan.id,
-          versionIndex: 0,
-          number: inst.number,
-          dueDate: new Date(inst.dueDate),
-          periodStart: new Date(inst.periodStart),
-          openingBalance: inst.openingBalance.toNumber(),
-          scheduledPrincipal: inst.principal.toNumber(),
-          scheduledInterest: inst.interest.toNumber(),
-          scheduledPayment: inst.payment.toNumber(),
-          closingBalance: inst.closingBalance.toNumber(),
-          status: 'PENDING' as any,
-        })),
-        skipDuplicates: true,
-      });
-    } catch (schedErr: any) {
-      this.logger.warn(`Error al generar cuotas de amortización para ${loanCode}: ${schedErr?.message}`);
+      const result = await withUniqueRetry(() =>
+        this.prisma.$transaction(async (tx) => {
+          // Cliente: reutilizar si ya existe por DUI o correo
+          let customer = await tx.customer.findFirst({
+            where: { OR: [{ dui: dto.dui }, { email: lead.email }] },
+          });
+
+          if (customer) {
+            customer = await tx.customer.update({
+              where: { id: customer.id },
+              data: {
+                status: CustomerStatus.ACTIVE,
+                dui: dto.dui,
+                nit: dto.nit,
+                address: dto.address,
+                economicActivity: dto.economicActivity,
+                monthlyIncome: dto.monthlyIncome,
+              },
+            });
+          } else {
+            const customerCode = await nextSequentialCode(
+              (prefix) => tx.customer.findFirst({ where: { code: { startsWith: prefix } }, orderBy: { code: 'desc' }, select: { code: true } }),
+              'CLI',
+            );
+            customer = await tx.customer.create({
+              data: {
+                code: customerCode,
+                fullName: lead.fullName,
+                dui: dto.dui,
+                nit: dto.nit,
+                phone: lead.phone,
+                email: lead.email,
+                address: dto.address,
+                economicActivity: dto.economicActivity,
+                monthlyIncome: dto.monthlyIncome,
+                status: CustomerStatus.ACTIVE,
+                internalNotes: `Cliente formalizado a partir del prospecto ${lead.code}`,
+              },
+            });
+          }
+
+          await tx.customerDocument.createMany({
+            data: storedDocs.map(({ doc, storedFileName }) => ({
+              customerId: customer!.id,
+              category: doc.category,
+              title: doc.title || `${doc.category} - ${doc.fileName}`,
+              fileKey: storedFileName,
+              fileName: doc.fileName,
+              mimeType: doc.mimeType,
+              fileSizeBytes: doc.buffer.length,
+              status: DocumentStatus.APPROVED,
+              notes: 'Documento validado en formalización de crédito desde prospecto',
+            })),
+          });
+
+          const loanCode = await nextSequentialCode(
+            (prefix) => tx.loan.findFirst({ where: { code: { startsWith: prefix } }, orderBy: { code: 'desc' }, select: { code: true } }),
+            'CRE',
+            4,
+          );
+
+          const loan = await tx.loan.create({
+            data: {
+              code: loanCode,
+              customerId: customer.id,
+              vehicleId: vehicle.id,
+              productId: product.id,
+              vehiclePrice: vehiclePrice.toFixed(2),
+              downPayment: downPayment.toFixed(2),
+              financedFees: 0,
+              originalPrincipal: principal.toFixed(2),
+              currentPrincipalBalance: principal.toFixed(2),
+              monthlyRate: monthlyRate.toString(),
+              termCount,
+              frequency: PaymentFrequency.MONTHLY,
+              dayCount: product.dayCountBasis,
+              method: product.method,
+              graceDays: product.graceDays,
+              lateRateMonthly: product.lateRateMonthly,
+              disbursementDate: new Date(disbursementDate),
+              firstDueDate: new Date(firstDueDate),
+              status: LoanStatus.ACTIVE,
+            },
+            include: { customer: true, vehicle: true },
+          });
+
+          await tx.loanContractVersion.create({
+            data: {
+              loanId: loan.id,
+              versionIndex: 0,
+              reason: 'ORIGINAL',
+              effectiveDate: new Date(disbursementDate),
+              principalBalance: principal.toFixed(2),
+              monthlyRate: monthlyRate.toString(),
+              levelPayment: schedule.installments[0]?.payment.toFixed(2) ?? null,
+            },
+          });
+
+          await tx.amortizationInstallment.createMany({
+            data: schedule.installments.map((inst) => ({
+              loanId: loan.id,
+              versionIndex: 0,
+              number: inst.number,
+              dueDate: new Date(inst.dueDate),
+              periodStart: new Date(inst.periodStart),
+              openingBalance: inst.openingBalance.toFixed(2),
+              scheduledPrincipal: inst.principal.toFixed(2),
+              scheduledInterest: inst.interest.toFixed(2),
+              scheduledPayment: inst.payment.toFixed(2),
+              closingBalance: inst.closingBalance.toFixed(2),
+              status: InstallmentStatus.PENDING,
+            })),
+          });
+
+          await tx.vehicle.update({ where: { id: vehicle.id }, data: { status: VehicleStatus.SOLD } });
+          await tx.vehicleStatusHistory.create({
+            data: {
+              vehicleId: vehicle.id,
+              fromStatus: vehicle.status,
+              toStatus: VehicleStatus.SOLD,
+              reason: `Financiado con crédito ${loanCode}`,
+            },
+          });
+
+          const note = `Formalizado a Crédito Activo [${loanCode}] el ${disbursementDate}. Expediente documental completo adjunto.`;
+          await tx.lead.update({
+            where: { id: leadId },
+            data: {
+              status: LeadStatus.CONVERTED,
+              vehicleId: vehicle.id,
+              internalNotes: [lead.internalNotes, dto.notes, note].filter(Boolean).join('\n'),
+            },
+          });
+
+          return { loan, customer };
+        }),
+      );
+
+      this.logger.log(`Crédito ${result.loan.code} activado para cliente ${result.customer.fullName}`);
+
+      return {
+        success: true,
+        message: `Crédito formalizado y activado exitosamente con código ${result.loan.code}.`,
+        loan: result.loan,
+        customer: result.customer,
+        levelPayment: schedule.installments[0]?.payment.toFixed(2),
+        documentsUploaded: documents.length,
+      };
+    } catch (err) {
+      await Promise.all(writtenFiles.map((f) => fs.promises.unlink(f).catch(() => undefined)));
+      throw err;
     }
-
-    // 9. Actualizar Vehículo y Prospecto
-    await this.prisma.vehicle.update({
-      where: { id: vehicle.id },
-      data: { status: VehicleStatus.SOLD },
-    });
-
-    await this.prisma.lead.update({
-      where: { id: leadId },
-      data: {
-        status: LeadStatus.CONVERTED,
-        internalNotes: `${lead.internalNotes ? lead.internalNotes + '\n' : ''}Formalizado exitosamente a Crédito Activo [${loanCode}] el ${today.toLocaleDateString('es-SV')}. Expediente documental completo adjunto.`,
-      },
-    });
-
-    this.logger.log(`Crédito ${loanCode} activado exitosamente para cliente ${customer.fullName}`);
-
-    return {
-      success: true,
-      message: `Crédito formalizado y activado exitosamente con código ${loanCode}.`,
-      loan,
-      customer,
-      documentsUploaded: dto.documents.length,
-    };
   }
 }

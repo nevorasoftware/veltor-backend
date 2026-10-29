@@ -1,4 +1,5 @@
-import { Controller, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, HttpCode, HttpStatus, BadRequestException } from '@nestjs/common';
+import { Public } from '../auth/public.decorator';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { IsNumber, IsString, IsEnum, IsOptional, Min, Max } from 'class-validator';
 import { AmortizationMethod, DayCountBasis, PaymentFrequency, simulate, SimulationResult } from './engine';
@@ -48,11 +49,21 @@ export class SimulateLoanDto {
 @ApiTags('Simulador Financiero')
 @Controller('simulator')
 export class SimulatorController {
+  @Public()
   @Post('calculate')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Simular financiamiento con el motor de cálculo VELTOR' })
   @ApiResponse({ status: 200, description: 'Proyección financiera calculada exitosamente' })
   calculate(@Body() dto: SimulateLoanDto): SimulationResult {
+    try {
+      return this.run(dto);
+    } catch (err: any) {
+      // Errores de validación del motor (montos inválidos, fechas, etc.) son errores del cliente
+      throw new BadRequestException(err?.message || 'Parámetros de simulación inválidos');
+    }
+  }
+
+  private run(dto: SimulateLoanDto): SimulationResult {
     return simulate({
       vehiclePrice: dto.vehiclePrice,
       downPayment: dto.downPayment,

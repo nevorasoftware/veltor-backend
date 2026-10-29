@@ -16,6 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { Response } from 'express';
 import { DocumentsService } from './documents.service';
+import { MAX_DOCUMENT_BYTES } from './documents.constants';
 import { DocumentCategory, DocumentStatus } from '@prisma/client';
 import { IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
@@ -65,9 +66,7 @@ export class DocumentsController {
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(
     FileInterceptor('file', {
-      limits: {
-        fileSize: 10 * 1024 * 1024, // 10 MB
-      },
+      limits: { fileSize: MAX_DOCUMENT_BYTES },
     }),
   )
   async uploadDocument(
@@ -109,7 +108,7 @@ export class DocumentsController {
 
     res.set({
       'Content-Type': document.mimeType,
-      'Content-Disposition': `inline; filename="${encodeURIComponent(document.fileName)}"`,
+      'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(document.fileName)}`,
       'Content-Length': document.fileSizeBytes,
     });
 

@@ -36,10 +36,11 @@ ENV PORT=8080
 COPY package*.json ./
 COPY prisma ./prisma/
 
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 RUN npx prisma generate
 
 COPY --from=builder /app/dist ./dist
+COPY scripts ./scripts
 
 # Crear directorio para documentos y expedientes
 RUN mkdir -p uploads/documents && chown -R node:node /app
@@ -48,4 +49,5 @@ USER node
 
 EXPOSE 8080
 
-CMD ["node", "dist/main.js"]
+# Aplica migraciones pendientes antes de iniciar la API
+CMD ["sh", "scripts/start.sh"]
