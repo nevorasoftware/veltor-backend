@@ -6,12 +6,14 @@ import { DomainEvents } from '../common/domain-events';
 import { MailService, MailResult } from '../mail/mail.service';
 import { FinanceService } from '../finance/finance.service';
 import { PdfService } from '../pdf/pdf.service';
+import { SettingsService } from '../settings/settings.service';
 import { InstallmentView, addDays, todayInTz, D, fmt } from '../finance/engine';
 import {
   accountStatementMail,
   leadReceivedMail,
   leadStaffAlertMail,
   loanApprovedMail,
+  loanApprovedStaffMail,
   paymentRegisteredMail,
   paymentReminderMail,
   testMail,
@@ -53,6 +55,7 @@ export class NotificationsService implements OnModuleInit {
     private readonly mail: MailService,
     private readonly finance: FinanceService,
     private readonly pdf: PdfService,
+    private readonly settings: SettingsService,
   ) {}
 
   onModuleInit() {
@@ -77,10 +80,7 @@ export class NotificationsService implements OnModuleInit {
       ...leadReceivedMail({ fullName: lead.fullName, code: lead.code, vehicle, termMonths: lead.termMonths }),
     });
 
-    const staff = (process.env.NOTIFY_STAFF_EMAILS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const staff = await this.settings.getStaffNotificationEmails();
     for (const to of staff) {
       await this.mail.send({
         to,
@@ -107,6 +107,17 @@ export class NotificationsService implements OnModuleInit {
       return null;
     });
 
+    const summary = {
+      fullName: loan.customer.fullName,
+      loanCode: loan.code,
+      vehicle: vehicleLabel(loan.vehicle) || '-',
+      principal: loan.originalPrincipal.toString(),
+      installment: first?.payment ?? '0',
+      termCount: loan.termCount,
+      monthlyRate: loan.monthlyRate.toString(),
+      firstDueDate: first?.dueDate ?? loan.firstDueDate.toISOString(),
+    };
+
     await this.mail.send({
       to: loan.customer.email,
       template: 'loan.approved',
@@ -115,17 +126,19 @@ export class NotificationsService implements OnModuleInit {
       attachments: schedulePdf
         ? [{ filename: `Tabla-Amortizacion-${loan.code}.pdf`, content: schedulePdf, contentType: 'application/pdf' }]
         : undefined,
-      ...loanApprovedMail({
-        fullName: loan.customer.fullName,
-        loanCode: loan.code,
-        vehicle: vehicleLabel(loan.vehicle) || '-',
-        principal: loan.originalPrincipal.toString(),
-        installment: first?.payment ?? '0',
-        termCount: loan.termCount,
-        monthlyRate: loan.monthlyRate.toString(),
-        firstDueDate: first?.dueDate ?? loan.firstDueDate.toISOString(),
-      }),
+      ...loanApprovedMail(summary),
     });
+
+    const staff = await this.settings.getStaffNotificationEmails();
+    for (const to of staff) {
+      await this.mail.send({
+        to,
+        template: 'loan.approved.staff',
+        dedupeKey: `loan:${loan.id}:approved:staff:${to}`,
+        loanId: loan.id,
+        ...loanApprovedStaffMail({ ...summary, email: loan.customer.email }),
+      });
+    }
   }
 
   async notifyPaymentRegistered(paymentId: string) {

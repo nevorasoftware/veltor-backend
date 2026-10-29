@@ -156,6 +156,36 @@ export function loanApprovedMail(p: {
   };
 }
 
+export function loanApprovedStaffMail(p: {
+  fullName: string;
+  email: string;
+  loanCode: string;
+  vehicle: string;
+  principal: string;
+  installment: string;
+  termCount: number;
+  monthlyRate: string;
+  firstDueDate: string;
+}): RenderedMail {
+  const title = `Crédito ${p.loanCode} aprobado`;
+  const rows: Row[] = [
+    ['Cliente', p.fullName],
+    ['Correo', p.email],
+    ['Vehículo', p.vehicle],
+    ['Monto financiado', usd(p.principal)],
+    ['Cuota mensual', usd(p.installment)],
+    ['Plazo', `${p.termCount} meses`],
+    ['Tasa mensual', `${(Number(p.monthlyRate) * 100).toFixed(2)}%`],
+    ['Primera cuota', dateSV(p.firstDueDate)],
+  ];
+  const url = publicUrl();
+  return {
+    subject: `${brand()}: crédito ${p.loanCode} aprobado — ${p.fullName}`,
+    html: layout(title, `${rowsTable(rows)}${url ? button('Abrir panel', `${url}/admin`) : ''}`),
+    text: textOf(title, [], rows),
+  };
+}
+
 export function paymentReminderMail(p: {
   fullName: string;
   loanCode: string;

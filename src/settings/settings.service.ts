@@ -2,6 +2,18 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 const RATE_KEY = 'PREFERENTIAL_MONTHLY_RATE';
+const STAFF_EMAILS_KEY = 'NOTIFY_STAFF_EMAILS';
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const parseEmails = (raw: string) => [
+  ...new Set(
+    raw
+      .split(/[,;\s]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  ),
+];
 
 @Injectable()
 export class SettingsService {
@@ -79,6 +91,49 @@ export class SettingsService {
       preferentialAnnualRate: Number((monthlyRate * 12).toFixed(4)),
       message: `Tasa preferencial actualizada a ${(monthlyRate * 100).toFixed(2)}% mensual (${(monthlyRate * 1200).toFixed(1)}% anual)`,
       updatedAt: updatedSetting.updatedAt,
+    };
+  }
+
+  /** Correos del personal que reciben avisos (nuevo prospecto, crédito aprobado). Si no se han parametrizado, usa NOTIFY_STAFF_EMAILS. */
+  async getStaffNotificationEmails(): Promise<string[]> {
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: STAFF_EMAILS_KEY } });
+    return parseEmails(setting ? setting.value : process.env.NOTIFY_STAFF_EMAILS || '');
+  }
+
+  async getNotificationSettings() {
+    const setting = await this.prisma.systemSetting.findUnique({ where: { key: STAFF_EMAILS_KEY } });
+    return {
+      staffEmails: await this.getStaffNotificationEmails(),
+      source: setting ? 'database' : 'environment',
+      updatedAt: setting?.updatedAt ?? null,
+    };
+  }
+
+  async updateStaffNotificationEmails(emails: string[], userId?: string) {
+    const clean = parseEmails(emails.join(','));
+    const invalid = clean.filter((e) => !EMAIL_RE.test(e));
+    if (invalid.length) throw new BadRequestException(`Correos inválidos: ${invalid.join(', ')}`);
+
+    const saved = await this.prisma.systemSetting.upsert({
+      where: { key: STAFF_EMAILS_KEY },
+      update: { value: clean.join(',') },
+      create: {
+        key: STAFF_EMAILS_KEY,
+        value: clean.join(','),
+        description: 'Correos del personal que reciben avisos de nuevos prospectos y créditos aprobados',
+        isPublic: false,
+      },
+    });
+
+    this.logger.log(`Correos de notificación al personal actualizados (${clean.length}) por usuario ${userId}`);
+    return {
+      success: true,
+      staffEmails: clean,
+      source: 'database',
+      message: clean.length
+        ? `Se notificará a ${clean.length} correo(s) del personal.`
+        : 'Sin correos configurados: el personal no recibirá avisos.',
+      updatedAt: saved.updatedAt,
     };
   }
 }
