@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { IsEmail, IsOptional } from 'class-validator';
@@ -45,6 +45,22 @@ export class NotificationsController {
   async emailStatement(@Param('id') id: string, @Body() dto: SendEmailDto) {
     this.ensureConfigured();
     return this.ensureSent(await this.notifications.sendAccountStatement(id, dto.to));
+  }
+
+  @Get('notifications/logs')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Últimos correos enviados o fallidos (diagnóstico)' })
+  logs(@Query('loanId') loanId?: string, @Query('take') take?: string) {
+    return this.notifications.recentLogs(loanId, take ? parseInt(take, 10) || 50 : 50);
+  }
+
+  @Post('finance/loans/:id/approved/email')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Reenviar los avisos de crédito aprobado (cliente y personal); no repite los ya enviados' })
+  async resendApproved(@Param('id') id: string) {
+    this.ensureConfigured();
+    await this.notifications.notifyLoanActivated(id);
+    return this.notifications.recentLogs(id);
   }
 
   @Post('notifications/test')

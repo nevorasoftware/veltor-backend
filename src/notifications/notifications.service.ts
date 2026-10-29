@@ -186,6 +186,25 @@ export class NotificationsService implements OnModuleInit {
     return { ...result, to: recipient };
   }
 
+  /** Últimos correos registrados (enviados o fallidos), para diagnóstico desde administración. */
+  recentLogs(loanId?: string, take = 50) {
+    return this.prisma.notificationLog.findMany({
+      where: loanId ? { loanId } : {},
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(Math.max(take, 1), 200),
+      select: {
+        recipientEmail: true,
+        subject: true,
+        templateName: true,
+        status: true,
+        errorMessage: true,
+        sentAt: true,
+        createdAt: true,
+        loanId: true,
+      },
+    });
+  }
+
   async sendTest(to: string) {
     return this.mail.send({ to, template: 'test', ...testMail() });
   }

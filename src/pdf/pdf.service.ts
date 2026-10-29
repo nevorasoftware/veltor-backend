@@ -3,6 +3,31 @@ import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { FinanceService } from '../finance/finance.service';
 
+// Línea del pie de página; las filas de las tablas no deben pasar de aquí
+const FOOTER_TOP = 735;
+
+/**
+ * Dibuja el pie en todas las páginas. El pie queda dentro del margen inferior, así que se
+ * anula temporalmente para que pdfkit no cree una página nueva (vacía) al escribirlo.
+ */
+function drawFooters(doc: PDFKit.PDFDocument, note: string, colorBorder: string, colorMuted: string) {
+  const range = doc.bufferedPageRange();
+  for (let i = range.start; i < range.start + range.count; i++) {
+    doc.switchToPage(i);
+    const bottomMargin = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    doc.moveTo(36, FOOTER_TOP).lineTo(576, FOOTER_TOP).strokeColor(colorBorder).lineWidth(0.5).stroke();
+    doc
+      .fontSize(8)
+      .font('Helvetica')
+      .fillColor(colorMuted)
+      .text('VELTOR — Una solución tecnológica de Nevora Software', 36, 745, { align: 'left', lineBreak: false })
+      .text(note, 36, 757, { align: 'left', lineBreak: false })
+      .text(`Página ${i - range.start + 1} de ${range.count}`, 36, 745, { width: 540, align: 'right', lineBreak: false });
+    doc.page.margins.bottom = bottomMargin;
+  }
+}
+
 @Injectable()
 export class PdfService {
   constructor(private readonly financeService: FinanceService) {}
@@ -23,7 +48,7 @@ export class PdfService {
     }));
 
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ margin: 36, size: 'LETTER' });
+      const doc = new PDFDocument({ margin: 36, size: 'LETTER', bufferPages: true });
       const buffers: Buffer[] = [];
 
       doc.on('data', buffers.push.bind(buffers));
@@ -103,7 +128,7 @@ export class PdfService {
         const item = installmentsToRender[i];
 
         // Manejo de salto de página
-        if (currentY > 720) {
+        if (currentY + 16 > FOOTER_TOP - 4) {
           doc.addPage({ margin: 36, size: 'LETTER' });
           currentY = 36;
 
@@ -138,16 +163,7 @@ export class PdfService {
         currentY += 16;
       }
 
-      // Pie de página oficial
-      const bottomY = Math.max(currentY + 20, 740);
-      doc.moveTo(36, 735).lineTo(576, 735).strokeColor(colorBorder).lineWidth(0.5).stroke();
-      doc
-        .fontSize(8)
-        .font('Helvetica')
-        .fillColor(colorMuted)
-        .text('VELTOR — Una solución tecnológica de Nevora Software', 36, 745, { align: 'left' })
-        .text('Documento emitido para fines informativos y contractuales de la cartera de crédito.', 36, 757, { align: 'left' });
-
+      drawFooters(doc, 'Documento emitido para fines informativos y contractuales de la cartera de crédito.', colorBorder, colorMuted);
       doc.end();
     });
   }
@@ -159,7 +175,7 @@ export class PdfService {
     const nextPending = snapshot.current.installments.find((i) => i.status !== 'PAID');
 
     return new Promise((resolve, reject) => {
-      const doc = new PDFDocument({ margin: 36, size: 'LETTER' });
+      const doc = new PDFDocument({ margin: 36, size: 'LETTER', bufferPages: true });
       const buffers: Buffer[] = [];
 
       doc.on('data', buffers.push.bind(buffers));
@@ -256,15 +272,7 @@ export class PdfService {
         }
       }
 
-      // Pie de página
-      doc.moveTo(36, 735).lineTo(576, 735).strokeColor(colorBorder).lineWidth(0.5).stroke();
-      doc
-        .fontSize(8)
-        .font('Helvetica')
-        .fillColor(colorMuted)
-        .text('VELTOR — Una solución tecnológica de Nevora Software', 36, 745, { align: 'left' })
-        .text('Este estado de cuenta refleja los movimientos contables registrados hasta la fecha de corte.', 36, 757, { align: 'left' });
-
+      drawFooters(doc, 'Este estado de cuenta refleja los movimientos contables registrados hasta la fecha de corte.', colorBorder, colorMuted);
       doc.end();
     });
   }
