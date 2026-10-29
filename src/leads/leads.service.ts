@@ -34,6 +34,7 @@ import * as path from 'path';
 import Decimal from 'decimal.js';
 import { generateSchedule, todayInTz, addMonths, fmt } from '../finance/engine';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
+import { DomainEvents } from '../common/domain-events';
 import { ALLOWED_DOCUMENT_MIME_TYPES, DOCUMENTS_UPLOAD_DIR, MAX_DOCUMENT_BYTES } from '../documents/documents.constants';
 
 export class CreateLeadDto {
@@ -224,7 +225,10 @@ const INCOME_CATEGORIES: DocumentCategory[] = [
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: DomainEvents,
+  ) {
     if (!fs.existsSync(DOCUMENTS_UPLOAD_DIR)) {
       fs.mkdirSync(DOCUMENTS_UPLOAD_DIR, { recursive: true });
     }
@@ -240,13 +244,13 @@ export class LeadsService {
       if (!exists) throw new BadRequestException('El vehículo seleccionado no está disponible.');
     }
 
-    return withUniqueRetry(async () => {
+    const lead = await withUniqueRetry(async () => {
       const code = await nextSequentialCode(
         (prefix) =>
           this.prisma.lead.findFirst({ where: { code: { startsWith: prefix } }, orderBy: { code: 'desc' }, select: { code: true } }),
         'PROS',
       );
-      const lead = await this.prisma.lead.create({
+      return this.prisma.lead.create({
         data: {
           code,
           fullName: dto.fullName.trim(),
@@ -261,9 +265,11 @@ export class LeadsService {
           privacyAccepted: dto.privacyAccepted,
         },
       });
-      // Respuesta pública mínima: no se devuelven datos internos
-      return { code: lead.code, createdAt: lead.createdAt };
     });
+
+    this.events.emit('lead.created', { leadId: lead.id });
+    // Respuesta pública mínima: no se devuelven datos internos
+    return { code: lead.code, createdAt: lead.createdAt };
   }
 
   async findAll(status?: LeadStatus) {
@@ -555,6 +561,7 @@ export class LeadsService {
       );
 
       this.logger.log(`Crédito ${result.loan.code} activado para cliente ${result.customer.fullName}`);
+      this.events.emit('loan.activated', { loanId: result.loan.id });
 
       return {
         success: true,

@@ -66,7 +66,7 @@ export class ReportsService {
   async getLoansSummary() {
     return this.prisma.loan.findMany({
       include: {
-        customer: { select: { id: true, code: true, fullName: true, dui: true, phone: true } },
+        customer: { select: { id: true, code: true, fullName: true, dui: true, phone: true, email: true } },
         vehicle: { select: { id: true, code: true, brand: true, model: true, year: true } },
       },
       orderBy: { createdAt: 'desc' },

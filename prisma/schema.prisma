@@ -693,9 +693,13 @@ model NotificationLog {
   status             NotificationStatus  @default(PENDING)
   errorMessage       String?
   sentAt             DateTime?
+  // Evita reenviar el mismo aviso (p. ej. el recordatorio de una cuota concreta)
+  dedupeKey          String?             @unique
+  loanId             String?
 
   createdAt          DateTime            @default(now())
 
+  @@index([loanId])
   @@map("notification_logs")
 }
 

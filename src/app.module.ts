@@ -2,6 +2,10 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
+import { DomainEventsModule } from './common/domain-events';
+import { MailModule } from './mail/mail.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
@@ -29,7 +33,10 @@ import { HealthController } from './health/health.controller';
         limit: Number(process.env.THROTTLE_LIMIT || 300),
       },
     ]),
+    ScheduleModule.forRoot(),
     PrismaModule,
+    DomainEventsModule,
+    MailModule,
     AuthModule,
     VehiclesModule,
     LeadsModule,
@@ -41,6 +48,7 @@ import { HealthController } from './health/health.controller';
     SettingsModule,
     ExpensesModule,
     PortalModule,
+    NotificationsModule,
     BootstrapModule,
   ],
   controllers: [HealthController],

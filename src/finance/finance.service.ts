@@ -13,12 +13,16 @@ import {
 } from './engine';
 import { Loan, LoanStatus, PaymentKind, PaymentMethod, PaymentTransaction, Prisma } from '@prisma/client';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
+import { DomainEvents } from '../common/domain-events';
 
 type LoanWithPayments = Loan & { payments: PaymentTransaction[] };
 
 @Injectable()
 export class FinanceService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: DomainEvents,
+  ) {}
 
   private buildContract(loan: Loan): LoanContract {
     return {
@@ -224,6 +228,8 @@ export class FinanceService {
         return newPayment;
       }),
     );
+
+    this.events.emit('payment.registered', { paymentId: payment.id });
 
     return {
       isDuplicate: false,

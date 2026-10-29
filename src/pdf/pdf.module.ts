@@ -7,5 +7,6 @@ import { FinanceModule } from '../finance/finance.module';
   imports: [FinanceModule],
   controllers: [PdfController],
   providers: [PdfService],
+  exports: [PdfService],
 })
 export class PdfModule {}
