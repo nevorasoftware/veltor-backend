@@ -10,6 +10,7 @@ import {
   LoanStatus,
   PaymentFrequency,
   InstallmentStatus,
+  LateFeeType,
 } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
@@ -32,7 +33,8 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import Decimal from 'decimal.js';
-import { generateSchedule, todayInTz, addMonths, fmt } from '../finance/engine';
+import { generateSchedule, todayInTz, addMonths, firstDueDateForDay, fmt } from '../finance/engine';
+import { SettingsService } from '../settings/settings.service';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
 import { DomainEvents } from '../common/domain-events';
 import { ALLOWED_DOCUMENT_MIME_TYPES, DOCUMENTS_UPLOAD_DIR, MAX_DOCUMENT_BYTES } from '../documents/documents.constants';
@@ -204,6 +206,27 @@ export class ConvertLeadToLoanDto {
   @IsOptional()
   monthlyRate?: number;
 
+  /** Día del mes en que vence cada cuota (1-28). Si se omite, se usa el parámetro general o el día del desembolso. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(28, { message: 'El día de pago debe estar entre 1 y 28 para existir en todos los meses.' })
+  @IsOptional()
+  paymentDay?: number;
+
+  /** Mora del crédito: por día de atraso, cuota fija por cuota vencida o sin recargo */
+  @IsEnum(LateFeeType)
+  @IsOptional()
+  lateFeeType?: LateFeeType;
+
+  /** Monto en USD: por día (PER_DAY) o por cuota vencida (PER_INSTALLMENT) */
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(10000)
+  @IsOptional()
+  lateFeeAmount?: number;
+
   @IsArray()
   @ArrayMinSize(5)
   @ValidateNested({ each: true })
@@ -228,6 +251,7 @@ export class LeadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: DomainEvents,
+    private readonly settings: SettingsService,
   ) {
     if (!fs.existsSync(DOCUMENTS_UPLOAD_DIR)) {
       fs.mkdirSync(DOCUMENTS_UPLOAD_DIR, { recursive: true });
@@ -391,8 +415,23 @@ export class LeadsService {
     }
     const monthlyRate = new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString());
 
+    // Día de pago y mora: lo indicado al aperturar o, si no, los parámetros de cobranza
+    const collection = await this.settings.getCollectionSettings();
+    const paymentDay = dto.paymentDay ?? collection.defaultPaymentDay ?? null;
+    const lateFeeType = dto.lateFeeType ?? collection.defaultLateFeeType;
+    const lateFeeAmount =
+      lateFeeType === LateFeeType.NONE
+        ? null
+        : new Decimal(
+            dto.lateFeeAmount ??
+              (lateFeeType === LateFeeType.PER_DAY ? collection.lateFeePerDayAmount : collection.lateFeePerInstallmentAmount),
+          );
+    if (lateFeeAmount && lateFeeAmount.lte(0)) {
+      throw new BadRequestException('Indique el monto de la mora o seleccione "Sin mora".');
+    }
+
     const disbursementDate = todayInTz();
-    const firstDueDate = addMonths(disbursementDate, 1);
+    const firstDueDate = paymentDay ? firstDueDateForDay(disbursementDate, paymentDay) : addMonths(disbursementDate, 1);
 
     const schedule = generateSchedule({
       principal,
@@ -500,7 +539,11 @@ export class LeadsService {
               dayCount: product.dayCountBasis,
               method: product.method,
               graceDays: product.graceDays,
-              lateRateMonthly: product.lateRateMonthly,
+              // La mora se rige por el recargo fijo del crédito; el interés moratorio queda para créditos anteriores
+              lateRateMonthly: null,
+              lateFeeType,
+              lateFeeAmount: lateFeeAmount?.toFixed(2) ?? null,
+              paymentDay,
               disbursementDate: new Date(disbursementDate),
               firstDueDate: new Date(firstDueDate),
               status: LoanStatus.ACTIVE,

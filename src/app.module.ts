@@ -19,6 +19,7 @@ import { SettingsModule } from './settings/settings.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { PortalModule } from './portal/portal.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
+import { StorageModule } from './storage/storage.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -36,6 +37,7 @@ import { HealthController } from './health/health.controller';
     ScheduleModule.forRoot(),
     PrismaModule,
     DomainEventsModule,
+    StorageModule,
     MailModule,
     AuthModule,
     VehiclesModule,

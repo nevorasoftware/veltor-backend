@@ -1,14 +1,27 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { VehicleStatus, Prisma } from '@prisma/client';
 import { CreateVehicleDto, UpdateVehicleDto, VehicleFilterDto, VehicleImageDto } from './vehicle.dto';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
+import { DRIVE_FOLDERS, GoogleDriveService } from '../storage/google-drive.service';
 
 const IMAGE_ORDER: Prisma.VehicleImageOrderByWithRelationInput[] = [{ isPrimary: 'desc' }, { sortOrder: 'asc' }];
 
+/** Ruta (relativa a la API) con la que se publican las fotos guardadas en Google Drive */
+const DRIVE_IMAGE_PATH = 'media/vehicle-images/';
+const DATA_URL_RE = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
+
+type VehicleRef = { code: string; brand: string; model: string; year: number };
+type ImageRow = { url: string; caption?: string; driveFileId: string | null; isPrimary: boolean; sortOrder: number };
+
 @Injectable()
 export class VehiclesService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(VehiclesService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly drive: GoogleDriveService,
+  ) {}
 
   async findAllPublic(filters: VehicleFilterDto) {
     const page = filters.page ?? 1;
@@ -77,13 +90,45 @@ export class VehiclesService {
     });
   }
 
-  private imagesCreate(images: VehicleImageDto[]) {
-    return images.map((img, idx) => ({
-      url: img.url,
-      caption: img.caption,
-      isPrimary: idx === 0,
-      sortOrder: idx,
-    }));
+  /**
+   * Prepara las filas de imágenes. Con Google Drive activo, las fotos cargadas desde el equipo (data URL)
+   * se suben a VELTOR/Vehiculos/<código - vehículo> y se publican por la API; las URL externas se guardan tal cual.
+   * Si Drive falla, la foto se conserva embebida para no perder la carga del usuario.
+   */
+  private async prepareImages(vehicle: VehicleRef, images: VehicleImageDto[], existing: { url: string; driveFileId: string | null }[] = []) {
+    const rows: ImageRow[] = [];
+    for (const [idx, img] of images.entries()) {
+      const row: ImageRow = { url: img.url, caption: img.caption, driveFileId: null, isPrimary: idx === 0, sortOrder: idx };
+      const kept = existing.find((e) => e.url === img.url && e.driveFileId);
+      const data = DATA_URL_RE.exec(img.url);
+      if (kept) {
+        row.driveFileId = kept.driveFileId;
+      } else if (data && this.drive.isEnabled()) {
+        try {
+          const ext = data[1].split('/')[1].replace('jpeg', 'jpg');
+          const file = await this.drive.upload(
+            [DRIVE_FOLDERS.vehicles, `${vehicle.code} - ${vehicle.brand} ${vehicle.model} ${vehicle.year}`],
+            `${vehicle.code}_foto-${idx + 1}_${Date.now()}.${ext}`,
+            data[1],
+            Buffer.from(data[2], 'base64'),
+          );
+          row.driveFileId = file.id;
+          row.url = DRIVE_IMAGE_PATH + file.id;
+        } catch (err: any) {
+          this.logger.error(`No se pudo subir la foto ${idx + 1} de ${vehicle.code} a Drive: ${err?.message || err}`);
+        }
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /** Envía a la papelera de Drive las fotos que ya no usa ningún vehículo */
+  private async trashUnused(previous: { driveFileId: string | null }[], current: ImageRow[]) {
+    const keep = new Set(current.map((r) => r.driveFileId).filter(Boolean));
+    for (const p of previous) {
+      if (p.driveFileId && !keep.has(p.driveFileId)) await this.drive.trash(p.driveFileId);
+    }
   }
 
   private validatePrices(salePrice: number, minDownPayment?: number) {
@@ -110,10 +155,14 @@ export class VehiclesService {
           description: data.description ?? '',
           features: data.features ?? [],
           minDownPayment: data.minDownPayment ?? 0,
-          images: images?.length ? { create: this.imagesCreate(images) } : undefined,
         },
-        include: { images: { orderBy: IMAGE_ORDER } },
       });
+    }).then(async (vehicle) => {
+      if (images?.length) {
+        const rows = await this.prepareImages(vehicle, images);
+        await this.prisma.vehicleImage.createMany({ data: rows.map((r) => ({ ...r, vehicleId: vehicle.id })) });
+      }
+      return this.findOne(vehicle.id);
     });
   }
 
@@ -124,14 +173,13 @@ export class VehiclesService {
       dto.minDownPayment ?? Number(current.minDownPayment),
     );
     const { images, status, ...data } = dto;
+    const rows = images ? await this.prepareImages({ ...current, ...data }, images, current.images) : null;
 
-    return this.prisma.$transaction(async (tx) => {
-      if (images) {
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (rows) {
         await tx.vehicleImage.deleteMany({ where: { vehicleId: id } });
-        if (images.length) {
-          await tx.vehicleImage.createMany({
-            data: this.imagesCreate(images).map((img) => ({ ...img, vehicleId: id })),
-          });
+        if (rows.length) {
+          await tx.vehicleImage.createMany({ data: rows.map((r) => ({ ...r, vehicleId: id })) });
         }
       }
       if (status && status !== current.status) {
@@ -145,6 +193,8 @@ export class VehiclesService {
         include: { images: { orderBy: IMAGE_ORDER } },
       });
     });
+    if (rows) await this.trashUnused(current.images, rows);
+    return updated;
   }
 
   async changeStatus(id: string, toStatus: VehicleStatus, reason?: string, userId?: string) {

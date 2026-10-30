@@ -177,6 +177,13 @@ enum AllocationConcept {
   SURPLUS
 }
 
+/// Recargo por atraso: NONE (sin recargo), PER_DAY (monto fijo por día de atraso tras la gracia), PER_INSTALLMENT (monto fijo por cuota vencida)
+enum LateFeeType {
+  NONE
+  PER_DAY
+  PER_INSTALLMENT
+}
+
 enum NotificationChannel {
   EMAIL
   SMS
@@ -332,6 +339,8 @@ model VehicleImage {
   vehicleId        String
   vehicle          Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   url              String
+  /// Archivo en Google Drive (si la imagen se almacenó allí)
+  driveFileId      String?   @unique
   isPrimary        Boolean   @default(false)
   sortOrder        Int       @default(0)
   caption          String?
@@ -504,6 +513,13 @@ model Loan {
   method               AmortizationMethod @default(FRENCH)
   graceDays            Int                @default(5)
   lateRateMonthly      Decimal?           @db.Decimal(6, 4)
+  /// Recargo por mora parametrizado al aperturar el crédito
+  lateFeeType          LateFeeType        @default(NONE)
+  lateFeeAmount        Decimal?           @db.Decimal(12, 2)
+  /// Día del mes en que vence cada cuota (1-28)
+  paymentDay           Int?
+  /// Carpeta del crédito en Google Drive (VELTOR/Creditos/<código>)
+  driveFolderId        String?
 
   disbursementDate     DateTime           @db.Date
   firstDueDate         DateTime           @db.Date

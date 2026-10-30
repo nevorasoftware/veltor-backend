@@ -37,6 +37,10 @@ export class FinanceService {
       rounding: 'HALF_UP',
       graceDays: loan.graceDays,
       lateInterestMonthlyRate: loan.lateRateMonthly ? loan.lateRateMonthly.toString() : null,
+      lateFee:
+        loan.lateFeeType !== 'NONE' && loan.lateFeeAmount
+          ? { type: loan.lateFeeType, amount: loan.lateFeeAmount.toFixed(2) }
+          : null,
     };
   }
 

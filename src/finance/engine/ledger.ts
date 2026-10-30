@@ -1,6 +1,6 @@
 import Decimal from 'decimal.js';
 import { D, ZERO, money, minDec, maxDec, sumDec, fmt, RoundingMode } from './decimal';
-import { DateStr, addDays, cmp, maxDate } from './dates';
+import { DateStr, addDays, cmp, diffDaysActual, maxDate } from './dates';
 import {
   AmortizationMethod,
   DayCountBasis,
@@ -28,6 +28,17 @@ export interface LoanContract {
   graceDays: number;
   /** Tasa mensual de interés moratorio sobre capital vencido. `null` = mora deshabilitada. */
   lateInterestMonthlyRate: string | null;
+  /**
+   * Recargo fijo por mora. Si está definido reemplaza al interés moratorio:
+   * - PER_DAY: `amount` por cada día calendario de atraso posterior a los días de gracia.
+   * - PER_INSTALLMENT: `amount` una sola vez por cuota que sigue impaga al terminar la gracia.
+   */
+  lateFee?: LateFee | null;
+}
+
+export interface LateFee {
+  type: 'PER_DAY' | 'PER_INSTALLMENT';
+  amount: string;
 }
 
 export type PaymentKind = 'INSTALLMENT' | 'PRINCIPAL_PREPAYMENT' | 'PAYOFF';
@@ -92,6 +103,8 @@ export interface InstallmentView {
   paidInterest: string;
   lateInterestAccrued: string;
   paidLateInterest: string;
+  /** Días de atraso a la fecha de corte (0 si no está vencida o ya se pagó). */
+  daysOverdue: number;
   status: InstallmentStatus;
 }
 
@@ -241,6 +254,8 @@ export class LoanLedger {
     const ledger = new LoanLedger(contract);
     const ordered = [...events].sort((a, b) => cmp(a.date, b.date) || a.seq - b.seq);
     for (const ev of ordered) ledger.apply(ev);
+    // La mora sigue corriendo hasta la fecha de corte aunque no haya nuevos pagos
+    if (ledger.status === 'ACTIVE' && cmp(asOf, ledger.lastEventDate) > 0) ledger.accrueLate(asOf);
     return ledger.snapshot(asOf);
   }
 
@@ -299,8 +314,9 @@ export class LoanLedger {
     return this.remaining(i).lte(0);
   }
 
-  /** Devenga interés moratorio sobre capital vencido hasta `d` (solo si el contrato lo habilita). */
+  /** Devenga la mora hasta `d`: recargo fijo (si el contrato lo define) o interés moratorio sobre capital vencido. */
   private accrueLate(d: DateStr): void {
+    if (this.c.lateFee) return this.accrueLateFee(d, this.c.lateFee);
     if (this.c.lateInterestMonthlyRate === null) return;
     const rate = D(this.c.lateInterestMonthlyRate);
     if (rate.lte(0)) return;
@@ -313,6 +329,29 @@ export class LoanLedger {
       if (cmp(from, d) >= 0) continue;
       const days = dayCount(this.c.dayCount, from, d);
       i.lateAccrued = i.lateAccrued.plus(money(unpaidPrincipal.times(dailyRate(rate, this.c.dayCount)).times(days), this.rounding));
+      i.lateThrough = d;
+    }
+  }
+
+  /**
+   * Recargo fijo. Los días de gracia no se cobran: con vencimiento el 10 y 3 días de gracia,
+   * un pago el 15 genera 2 días de mora (14 y 15).
+   */
+  private accrueLateFee(d: DateStr, fee: LateFee): void {
+    const amount = D(fee.amount);
+    if (amount.lte(0)) return;
+    for (const i of this.live()) {
+      const unpaid = i.principal.minus(i.paidPrincipal).plus(i.interest.minus(i.paidInterest));
+      if (unpaid.lte(0)) continue;
+      const graceEnd = addDays(i.dueDate, this.c.graceDays);
+      if (cmp(d, graceEnd) <= 0) continue;
+      if (fee.type === 'PER_INSTALLMENT') {
+        if (i.lateThrough === null) i.lateAccrued = i.lateAccrued.plus(amount);
+      } else {
+        const from = i.lateThrough ? maxDate(i.lateThrough, graceEnd) : graceEnd;
+        const days = diffDaysActual(from, d);
+        if (days > 0) i.lateAccrued = i.lateAccrued.plus(amount.times(days));
+      }
       i.lateThrough = d;
     }
   }
@@ -611,6 +650,11 @@ export class LoanLedger {
     return 'PENDING';
   }
 
+  private daysOverdue(i: WInst, asOf: DateStr): number {
+    if (i.terminal || this.isPaid(i) || cmp(i.dueDate, asOf) >= 0) return 0;
+    return diffDaysActual(i.dueDate, asOf);
+  }
+
   private view(i: WInst, asOf: DateStr): InstallmentView {
     return {
       number: i.number,
@@ -625,6 +669,7 @@ export class LoanLedger {
       paidInterest: fmt(i.paidInterest),
       lateInterestAccrued: fmt(i.lateAccrued),
       paidLateInterest: fmt(i.paidLate),
+      daysOverdue: this.daysOverdue(i, asOf),
       status: this.statusOf(i, asOf),
     };
   }

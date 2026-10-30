@@ -71,6 +71,10 @@ export class PortalController {
         termCount: loan.termCount,
         disbursementDate: loan.disbursementDate,
         firstDueDate: loan.firstDueDate,
+        paymentDay: loan.paymentDay,
+        graceDays: loan.graceDays,
+        lateFeeType: loan.lateFeeType,
+        lateFeeAmount: loan.lateFeeAmount,
         vehicle: { brand: loan.vehicle.brand, model: loan.vehicle.model, year: loan.vehicle.year, color: loan.vehicle.color },
       },
       payments: loan.payments.map((p) => ({

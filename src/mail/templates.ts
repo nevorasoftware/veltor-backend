@@ -213,6 +213,45 @@ export function paymentReminderMail(p: {
   };
 }
 
+export function paymentOverdueMail(p: {
+  fullName: string;
+  loanCode: string;
+  installmentNumber: number;
+  termCount: number;
+  dueDate: string;
+  daysOverdue: number;
+  graceDays: number;
+  installmentBalance: string;
+  lateFee: string;
+  lateFeeRule: string | null;
+  totalDue: string;
+}): RenderedMail {
+  const title = 'Tienes una cuota vencida';
+  const rows: Row[] = [
+    ['Crédito', p.loanCode],
+    ['Cuota', `${p.installmentNumber} de ${p.termCount}`],
+    ['Fecha de vencimiento', dateSV(p.dueDate)],
+    ['Días de atraso', String(p.daysOverdue)],
+    ['Saldo de la cuota', usd(p.installmentBalance)],
+    ['Mora acumulada', usd(p.lateFee)],
+    ['Total a pagar hoy', usd(p.totalDue)],
+  ];
+  const intro = `Hola ${firstName(p.fullName)}, tu cuota ${p.installmentNumber} venció el ${dateSV(p.dueDate)} y aún tiene saldo pendiente.`;
+  const rule = p.lateFeeRule
+    ? `Pasados los ${p.graceDays} días de gracia se aplica mora de ${p.lateFeeRule}, que se suma al saldo hasta que registres el pago.`
+    : '';
+  const note = 'Si ya realizaste el pago, haz caso omiso de este mensaje o envíanos tu comprobante.';
+  const portal = portalLink();
+  return {
+    subject: `${brand()}: cuota ${p.installmentNumber} vencida — total a pagar ${usd(p.totalDue)}`,
+    html: layout(
+      title,
+      `<p>${esc(intro)}</p>${rowsTable(rows)}${rule ? `<p>${esc(rule)}</p>` : ''}<p>${esc(note)}</p>${portal.html}`,
+    ),
+    text: textOf(title, [intro, rule, note, portal.text].filter(Boolean), rows),
+  };
+}
+
 export function paymentRegisteredMail(p: {
   fullName: string;
   loanCode: string;

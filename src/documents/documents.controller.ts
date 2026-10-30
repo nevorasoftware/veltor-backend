@@ -17,7 +17,8 @@ import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { Response } from 'express';
 import { DocumentsService } from './documents.service';
 import { MAX_DOCUMENT_BYTES } from './documents.constants';
-import { DocumentCategory, DocumentStatus } from '@prisma/client';
+import { DocumentCategory, DocumentStatus, UserRole } from '@prisma/client';
+import { Roles } from '../auth/roles.decorator';
 import { IsEnum, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class UploadDocumentBodyDto {
@@ -113,6 +114,13 @@ export class DocumentsController {
     });
 
     stream.pipe(res);
+  }
+
+  @Post('finance/loans/:id/drive/archive')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Archivar en Google Drive el expediente y la tabla de amortización de un crédito' })
+  async archiveLoan(@Param('id') id: string) {
+    return this.documentsService.archiveLoanToDrive(id);
   }
 
   @Patch('documents/:id/status')

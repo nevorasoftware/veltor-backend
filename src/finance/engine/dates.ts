@@ -92,3 +92,21 @@ export function toDateStr(d: Date): DateStr {
 export function toJsDate(d: DateStr): Date {
   return new Date(toUtc(d));
 }
+
+/** Plazo mínimo (días) entre el desembolso y la primera cuota cuando se fija un día de pago. */
+export const MIN_FIRST_PERIOD_DAYS = 15;
+
+/**
+ * Primera fecha de vencimiento para cuotas que vencen el día `paymentDay` de cada mes:
+ * la ocurrencia más cercana a un mes después del desembolso, con al menos 15 días de plazo.
+ * Ej.: desembolso 29/10 y día 10 → 10/12; desembolso 15/10 y día 10 → 10/11.
+ */
+export function firstDueDateForDay(disbursement: DateStr, paymentDay: number): DateStr {
+  const target = addMonths(disbursement, 1);
+  const { y, m } = parse(target);
+  const candidates = [-1, 0, 1].map((offset) => addMonths(make(y, m, 1), offset, paymentDay));
+  const valid = candidates.filter((c) => diffDaysActual(disbursement, c) >= MIN_FIRST_PERIOD_DAYS);
+  return valid.reduce((best, c) =>
+    Math.abs(diffDaysActual(target, c)) < Math.abs(diffDaysActual(target, best)) ? c : best,
+  );
+}

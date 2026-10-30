@@ -6,6 +6,43 @@ const STAFF_EMAILS_KEY = 'NOTIFY_STAFF_EMAILS';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Cobranza: recordatorios, gracia y mora
+const COLLECTION_KEYS = {
+  reminderDaysBefore: 'REMINDER_DAYS_BEFORE',
+  overdueReminderEveryDays: 'OVERDUE_REMINDER_EVERY_DAYS',
+  defaultPaymentDay: 'DEFAULT_PAYMENT_DAY',
+  defaultLateFeeType: 'DEFAULT_LATE_FEE_TYPE',
+  lateFeePerDayAmount: 'LATE_FEE_PER_DAY_AMOUNT',
+  lateFeePerInstallmentAmount: 'LATE_FEE_PER_INSTALLMENT_AMOUNT',
+} as const;
+
+export type LateFeeTypeValue = 'NONE' | 'PER_DAY' | 'PER_INSTALLMENT';
+
+export interface CollectionSettings {
+  /** Días antes del vencimiento en que se envía el recordatorio (0 = el mismo día) */
+  reminderDaysBefore: number;
+  /** Días de gracia tras el vencimiento antes de cobrar mora */
+  graceDays: number;
+  /** Cada cuántos días se repite el aviso de cuota vencida (0 = solo una vez) */
+  overdueReminderEveryDays: number;
+  /** Día del mes sugerido para las cuotas de un crédito nuevo (null = mismo día del desembolso) */
+  defaultPaymentDay: number | null;
+  defaultLateFeeType: LateFeeTypeValue;
+  lateFeePerDayAmount: number;
+  lateFeePerInstallmentAmount: number;
+}
+
+const LATE_FEE_TYPES: LateFeeTypeValue[] = ['NONE', 'PER_DAY', 'PER_INSTALLMENT'];
+
+const toInt = (v: string | undefined, fallback: number) => {
+  const n = v === undefined ? NaN : parseInt(v, 10);
+  return Number.isInteger(n) ? n : fallback;
+};
+const toNum = (v: string | undefined, fallback: number) => {
+  const n = v === undefined ? NaN : parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
 const parseEmails = (raw: string) => [
   ...new Set(
     raw
@@ -92,6 +129,62 @@ export class SettingsService {
       message: `Tasa preferencial actualizada a ${(monthlyRate * 100).toFixed(2)}% mensual (${(monthlyRate * 1200).toFixed(1)}% anual)`,
       updatedAt: updatedSetting.updatedAt,
     };
+  }
+
+  async getCollectionSettings(): Promise<CollectionSettings> {
+    const [rows, product] = await Promise.all([
+      this.prisma.systemSetting.findMany({ where: { key: { in: Object.values(COLLECTION_KEYS) } } }),
+      this.activeProduct(),
+    ]);
+    const get = (k: keyof typeof COLLECTION_KEYS) => rows.find((r) => r.key === COLLECTION_KEYS[k])?.value;
+    const envDays = (process.env.PAYMENT_REMINDER_DAYS || '').split(',')[0]?.trim();
+    const paymentDay = toInt(get('defaultPaymentDay'), 0);
+    const type = get('defaultLateFeeType') as LateFeeTypeValue | undefined;
+
+    return {
+      reminderDaysBefore: toInt(get('reminderDaysBefore') ?? envDays, 3),
+      graceDays: product?.graceDays ?? 5,
+      overdueReminderEveryDays: toInt(get('overdueReminderEveryDays'), 7),
+      defaultPaymentDay: paymentDay >= 1 && paymentDay <= 28 ? paymentDay : null,
+      defaultLateFeeType: type && LATE_FEE_TYPES.includes(type) ? type : 'PER_DAY',
+      lateFeePerDayAmount: toNum(get('lateFeePerDayAmount'), 5),
+      lateFeePerInstallmentAmount: toNum(get('lateFeePerInstallmentAmount'), 20),
+    };
+  }
+
+  async updateCollectionSettings(dto: Partial<CollectionSettings>, userId?: string) {
+    const product = await this.activeProduct();
+    if (dto.graceDays !== undefined && !product) {
+      throw new BadRequestException('No hay un producto financiero activo configurado.');
+    }
+
+    const values: [keyof typeof COLLECTION_KEYS, string, string][] = [];
+    const add = (k: keyof typeof COLLECTION_KEYS, v: unknown, description: string) => {
+      if (v !== undefined) values.push([k, v === null ? '' : String(v), description]);
+    };
+    add('reminderDaysBefore', dto.reminderDaysBefore, 'Días antes del vencimiento para enviar el recordatorio de pago');
+    add('overdueReminderEveryDays', dto.overdueReminderEveryDays, 'Frecuencia en días del aviso de cuota vencida (0 = una vez)');
+    add('defaultPaymentDay', dto.defaultPaymentDay, 'Día del mes sugerido para el vencimiento de cuotas');
+    add('defaultLateFeeType', dto.defaultLateFeeType, 'Tipo de mora sugerido al aperturar un crédito');
+    add('lateFeePerDayAmount', dto.lateFeePerDayAmount, 'Monto de mora por día de atraso (USD)');
+    add('lateFeePerInstallmentAmount', dto.lateFeePerInstallmentAmount, 'Monto de mora por cuota vencida (USD)');
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const [k, value, description] of values) {
+        await tx.systemSetting.upsert({
+          where: { key: COLLECTION_KEYS[k] },
+          update: { value },
+          create: { key: COLLECTION_KEYS[k], value, description, isPublic: false },
+        });
+      }
+      // Los días de gracia viven en el producto activo y se copian a cada crédito al aperturarlo
+      if (dto.graceDays !== undefined) {
+        await tx.financingProduct.updateMany({ where: { isActive: true }, data: { graceDays: dto.graceDays } });
+      }
+    });
+
+    this.logger.log(`Parámetros de cobranza actualizados por usuario ${userId}`);
+    return { success: true, message: 'Parámetros de cobranza y mora actualizados.', ...(await this.getCollectionSettings()) };
   }
 
   /** Correos del personal que reciben avisos (nuevo prospecto, crédito aprobado). Si no se han parametrizado, usa NOTIFY_STAFF_EMAILS. */

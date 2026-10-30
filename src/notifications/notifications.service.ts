@@ -15,8 +15,10 @@ import {
   loanApprovedMail,
   loanApprovedStaffMail,
   paymentRegisteredMail,
+  paymentOverdueMail,
   paymentReminderMail,
   testMail,
+  usd,
 } from '../mail/templates';
 
 const TIMEZONE = process.env.APP_TIMEZONE || 'America/El_Salvador';
@@ -36,13 +38,15 @@ const amountDue = (i: InstallmentView) =>
 
 const isOpen = (i: InstallmentView) => i.status === 'PENDING' || i.status === 'PARTIAL' || i.status === 'OVERDUE';
 
-/** Días de anticipación de los recordatorios, p. ej. PAYMENT_REMINDER_DAYS=3,0 (0 = el mismo día) */
-function reminderDays(): number[] {
-  const parsed = (process.env.PAYMENT_REMINDER_DAYS || '3,0')
-    .split(',')
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isInteger(n) && n >= 0 && n <= 30);
-  return [...new Set(parsed)];
+/** Saldo de capital + interés de la cuota, sin la mora */
+const installmentBalance = (i: InstallmentView) => fmt(D(i.payment).minus(i.paidPrincipal).minus(i.paidInterest));
+const lateFeeDue = (i: InstallmentView) => fmt(D(i.lateInterestAccrued).minus(i.paidLateInterest));
+
+function lateFeeRule(loan: { lateFeeType: string; lateFeeAmount: { toString(): string } | null; lateRateMonthly: { toString(): string } | null }) {
+  if (loan.lateFeeType === 'PER_DAY' && loan.lateFeeAmount) return `${usd(loan.lateFeeAmount.toString())} por cada día de atraso`;
+  if (loan.lateFeeType === 'PER_INSTALLMENT' && loan.lateFeeAmount) return `${usd(loan.lateFeeAmount.toString())} por cuota vencida`;
+  if (loan.lateRateMonthly) return `interés moratorio de ${(Number(loan.lateRateMonthly.toString()) * 100).toFixed(2)}% mensual sobre el capital vencido`;
+  return null;
 }
 
 @Injectable()
@@ -209,48 +213,96 @@ export class NotificationsService implements OnModuleInit {
     return this.mail.send({ to, template: 'test', ...testMail() });
   }
 
-  /** Recordatorios diarios de cuotas próximas a vencer. La clave de deduplicación evita repetirlos. */
+  /**
+   * Daemon diario de cobranza (8:00, hora de El Salvador). Para cada crédito activo recalcula la mora al día
+   * y envía:
+   * - recordatorio de pago N días antes del vencimiento (N = parámetro "días de recordatorio");
+   * - aviso de cuota vencida al terminar los días de gracia, con el saldo de la cuota y la mora acumulada,
+   *   repetido cada M días mientras siga pendiente (M = parámetro "repetir aviso de mora").
+   * Las claves de deduplicación evitan reenvíos aunque se ejecute varias veces el mismo día.
+   */
   @Cron('0 8 * * *', { name: 'payment-reminders', timeZone: TIMEZONE })
   async sendPaymentReminders() {
-    if (!this.mail.isConfigured()) return { checked: 0, sent: 0 };
+    if (!this.mail.isConfigured()) return { checked: 0, reminders: 0, overdueNotices: 0, sent: 0 };
 
     const today = todayInTz(TIMEZONE);
-    const days = reminderDays();
-    const targets = new Map(days.map((d) => [addDays(today, d), d]));
+    const cfg = await this.settings.getCollectionSettings();
+    const reminderTarget = addDays(today, cfg.reminderDaysBefore);
 
     const loans = await this.prisma.loan.findMany({ where: { status: LoanStatus.ACTIVE }, select: { id: true } });
-    let sent = 0;
+    let reminders = 0;
+    let overdueNotices = 0;
 
     for (const { id } of loans) {
       try {
         const { loan, snapshot } = await this.finance.getLoanLedgerSnapshot(id, today);
         for (const inst of snapshot.current.installments) {
-          const daysBefore = targets.get(inst.dueDate);
-          if (daysBefore === undefined || !isOpen(inst) || !D(amountDue(inst)).gt(0)) continue;
+          if (!isOpen(inst) || !D(amountDue(inst)).gt(0)) continue;
 
-          const result = await this.mail.send({
-            to: loan.customer.email,
-            template: 'payment.reminder',
-            dedupeKey: `reminder:${loan.id}:${inst.number}:${inst.dueDate}:${daysBefore}`,
-            loanId: loan.id,
-            ...paymentReminderMail({
-              fullName: loan.customer.fullName,
-              loanCode: loan.code,
-              installmentNumber: inst.number,
-              termCount: loan.termCount,
-              dueDate: inst.dueDate,
-              amountDue: amountDue(inst),
-              daysBefore,
-            }),
-          });
-          if (result.status === 'SENT') sent++;
+          if (inst.dueDate === reminderTarget) {
+            const result = await this.mail.send({
+              to: loan.customer.email,
+              template: 'payment.reminder',
+              dedupeKey: `reminder:${loan.id}:${inst.number}:${inst.dueDate}:${cfg.reminderDaysBefore}`,
+              loanId: loan.id,
+              ...paymentReminderMail({
+                fullName: loan.customer.fullName,
+                loanCode: loan.code,
+                installmentNumber: inst.number,
+                termCount: loan.termCount,
+                dueDate: inst.dueDate,
+                amountDue: amountDue(inst),
+                daysBefore: cfg.reminderDaysBefore,
+              }),
+            });
+            if (result.status === 'SENT') reminders++;
+          }
+
+          // Aviso de mora: a partir del primer día posterior a la gracia del crédito
+          if (inst.daysOverdue > loan.graceDays && (await this.overdueNoticeDue(loan.id, inst, today, cfg.overdueReminderEveryDays))) {
+            const result = await this.mail.send({
+              to: loan.customer.email,
+              template: 'payment.overdue',
+              dedupeKey: `overdue:${loan.id}:${inst.number}:${inst.dueDate}:${today}`,
+              loanId: loan.id,
+              ...paymentOverdueMail({
+                fullName: loan.customer.fullName,
+                loanCode: loan.code,
+                installmentNumber: inst.number,
+                termCount: loan.termCount,
+                dueDate: inst.dueDate,
+                daysOverdue: inst.daysOverdue,
+                graceDays: loan.graceDays,
+                installmentBalance: installmentBalance(inst),
+                lateFee: lateFeeDue(inst),
+                lateFeeRule: lateFeeRule(loan),
+                totalDue: amountDue(inst),
+              }),
+            });
+            if (result.status === 'SENT') overdueNotices++;
+          }
         }
       } catch (err: any) {
-        this.logger.error(`Recordatorios del crédito ${id}: ${err?.message || err}`);
+        this.logger.error(`Cobranza del crédito ${id}: ${err?.message || err}`);
       }
     }
 
-    this.logger.log(`Recordatorios de pago: ${sent} enviados, ${loans.length} créditos revisados.`);
-    return { checked: loans.length, sent };
+    this.logger.log(
+      `Cobranza diaria: ${reminders} recordatorios y ${overdueNotices} avisos de mora enviados, ${loans.length} créditos revisados.`,
+    );
+    return { checked: loans.length, reminders, overdueNotices, sent: reminders + overdueNotices };
+  }
+
+  /** El primer aviso sale apenas termina la gracia; después, cada `everyDays` días (0 = solo una vez). */
+  private async overdueNoticeDue(loanId: string, inst: InstallmentView, today: string, everyDays: number) {
+    const last = await this.prisma.notificationLog.findFirst({
+      where: { status: 'SENT', dedupeKey: { startsWith: `overdue:${loanId}:${inst.number}:${inst.dueDate}:` } },
+      orderBy: { sentAt: 'desc' },
+      select: { dedupeKey: true },
+    });
+    if (!last?.dedupeKey) return true;
+    if (everyDays === 0) return false;
+    const lastDay = last.dedupeKey.slice(-10);
+    return addDays(lastDay, everyDays) <= today;
   }
 }

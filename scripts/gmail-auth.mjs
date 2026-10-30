@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Obtiene el GMAIL_REFRESH_TOKEN para que la API envíe correos desde tu cuenta de Gmail.
+// Obtiene el GMAIL_REFRESH_TOKEN para que la API envíe correos desde tu cuenta de Gmail
+// y guarde archivos en Google Drive (carpeta VELTOR). El mismo token sirve para ambos.
 // Uso: node scripts/gmail-auth.mjs <CLIENT_ID> <CLIENT_SECRET>
-// Requiere un "ID de cliente OAuth" de tipo "App de escritorio" en Google Cloud Console.
+// Requiere un "ID de cliente OAuth" de tipo "App de escritorio" en Google Cloud Console,
+// con las APIs "Gmail API" y "Google Drive API" habilitadas en el proyecto.
 import http from 'node:http';
 
 const [clientId = process.env.GMAIL_CLIENT_ID, clientSecret = process.env.GMAIL_CLIENT_SECRET] = process.argv.slice(2);
@@ -18,7 +20,8 @@ const authUrl =
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'https://www.googleapis.com/auth/gmail.send',
+    // drive.file: solo da acceso a los archivos y carpetas que crea VELTOR, no al resto de tu Drive
+    scope: 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/drive.file',
     access_type: 'offline',
     prompt: 'consent',
   });
@@ -45,7 +48,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' }).end('No se obtuvo el refresh token. Revisa la consola.');
   } else {
     console.log('\nListo. Agrega esta variable al backend en Railway:\n');
-    console.log(`GMAIL_REFRESH_TOKEN=${body.refresh_token}\n`);
+    console.log(`GMAIL_REFRESH_TOKEN=${body.refresh_token}`);
+    console.log('STORAGE_DRIVER=gdrive\n');
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Listo. Ya puedes cerrar esta ventana y volver a la consola.');
   }
   server.close();
