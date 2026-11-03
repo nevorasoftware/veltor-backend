@@ -7,12 +7,14 @@ import { MailService } from '../mail/mail.service';
 import { platformAccessMail } from '../mail/templates';
 import { TenantContext } from '../tenant/tenant-context';
 
-/** Único superadministrador de la plataforma (contrato multiempresa) */
-export const PLATFORM_SUPERADMIN_EMAIL = 'softwarenevora@gmail.com';
+/** Único superadministrador de la plataforma (SUPERADMIN_EMAIL; por defecto superadmin@veltor.app) */
+export const PLATFORM_SUPERADMIN_EMAIL = (process.env.SUPERADMIN_EMAIL || 'superadmin@veltor.app').toLowerCase().trim();
 
 /**
  * Inicialización al arrancar (idempotente). NO crea empresas, productos ni datos de ejemplo (fase 2, punto 6):
- *  - Garantiza el superadministrador de plataforma softwarenevora@gmail.com (companyId = null). Si hay que
+ *  - Si el correo del superadmin cambió (antes softwarenevora@gmail.com), RENOMBRA el SUPERADMIN de plataforma
+ *    existente (companyId = null) al correo nuevo, conservando su contraseña.
+ *  - Garantiza el superadministrador de plataforma PLATFORM_SUPERADMIN_EMAIL (companyId = null). Si hay que
  *    crearlo, usa BOOTSTRAP_SUPERADMIN_PASSWORD o genera una contraseña temporal que se envía POR CORREO a esa
  *    cuenta (y queda en el log como respaldo si el correo falla).
  *  - Cualquier otro SUPERADMIN pasa a ADMIN (de la empresa por defecto, si el usuario no tiene empresa).
@@ -29,6 +31,8 @@ export class BootstrapService implements OnApplicationBootstrap {
 
   async onApplicationBootstrap() {
     try {
+      // El renombre va primero: si no, el superadmin anterior se degradaría a ADMIN
+      await this.renameLegacySuperadmin();
       await this.ensureSingleSuperadmin();
       await this.ensureSuperadmin();
     } catch (err: any) {
@@ -37,7 +41,24 @@ export class BootstrapService implements OnApplicationBootstrap {
     this.warnEphemeralStorage();
   }
 
-  /** Solo softwarenevora@gmail.com es SUPERADMIN; los demás pasan a ADMIN de su empresa. */
+  /**
+   * Cambio de correo del superadmin: si no existe un usuario con PLATFORM_SUPERADMIN_EMAIL pero sí un SUPERADMIN
+   * de plataforma (companyId = null), se le cambia el correo. Conserva su contraseña (passwordHash) y su id.
+   */
+  private async renameLegacySuperadmin() {
+    const db = this.prisma.unscoped;
+    if (await db.user.findUnique({ where: { email: PLATFORM_SUPERADMIN_EMAIL }, select: { id: true } })) return;
+    const legacy = await db.user.findFirst({
+      where: { role: UserRole.SUPERADMIN, companyId: null },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, email: true },
+    });
+    if (!legacy) return;
+    await db.user.update({ where: { id: legacy.id }, data: { email: PLATFORM_SUPERADMIN_EMAIL } });
+    this.logger.warn(`Superadministrador renombrado: ${legacy.email} → ${PLATFORM_SUPERADMIN_EMAIL} (contraseña conservada).`);
+  }
+
+  /** Solo PLATFORM_SUPERADMIN_EMAIL es SUPERADMIN; los demás pasan a ADMIN de su empresa. */
   private async ensureSingleSuperadmin() {
     const db = this.prisma.unscoped;
     const others = await db.user.findMany({

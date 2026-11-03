@@ -1,8 +1,8 @@
-import { Controller, Post, Get, Patch, Put, Body, Param, Query } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Put, Body, Param, Query, Request } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { LeadsService, CreateLeadDto, UpdateLeadDto, UpdateLeadStatusDto, ConvertLeadToLoanDto } from './leads.service';
-import { LeadStatus } from '@prisma/client';
+import { LeadStatus, UserRole } from '@prisma/client';
 import { Public } from '../auth/public.decorator';
 
 @ApiTags('Prospectos (Leads)')
@@ -15,8 +15,10 @@ export class LeadsController {
   @Post()
   @ApiOperation({ summary: 'Captación pública de prospectos sin requerir registro' })
   @ApiResponse({ status: 201, description: 'Prospecto registrado exitosamente en el sistema' })
-  async create(@Body() dto: CreateLeadDto) {
-    return this.leadsService.createPublicLead(dto);
+  async create(@Body() dto: CreateLeadDto, @Request() req: any) {
+    // initialLoad (sin correos) solo cuenta si quien lo pide es personal autenticado de la empresa
+    const staff = !!req.user && req.user.role !== UserRole.CUSTOMER;
+    return this.leadsService.createPublicLead(dto, !!dto.initialLoad && staff);
   }
 
   @Get()

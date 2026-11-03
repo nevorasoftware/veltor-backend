@@ -34,6 +34,11 @@ export interface LoanContract {
    * - PER_INSTALLMENT: `amount` una sola vez por cuota que sigue impaga al terminar la gracia.
    */
   lateFee?: LateFee | null;
+  /**
+   * Seguro mensual fijo que se suma a cada cuota como concepto aparte (cuota + seguro).
+   * `null` o "0" = sin seguro. Se cobra antes que el interés y no genera mora propia.
+   */
+  insuranceMonthly?: string | null;
 }
 
 export interface LateFee {
@@ -78,6 +83,7 @@ export type InstallmentStatus =
 
 export type AllocationConcept =
   | 'LATE_INTEREST'
+  | 'INSURANCE'
   | 'INTEREST'
   | 'PRINCIPAL'
   | 'ACCRUED_INTEREST'
@@ -99,8 +105,13 @@ export interface InstallmentView {
   interest: string;
   payment: string;
   closingBalance: string;
+  /** Seguro de la cuota (0 si el crédito no tiene seguro) */
+  insurance: string;
+  /** Cuota total a pagar: capital + interés + seguro (sin mora) */
+  totalPayment: string;
   paidPrincipal: string;
   paidInterest: string;
+  paidInsurance: string;
   lateInterestAccrued: string;
   paidLateInterest: string;
   /** Días de atraso a la fecha de corte (0 si no está vencida o ya se pagó). */
@@ -134,6 +145,8 @@ export interface PayoffQuote {
   date: DateStr;
   overdueLateInterest: string;
   overdueInterest: string;
+  /** Seguro de cuotas vencidas pendiente */
+  overdueInsurance: string;
   accruedInterest: string;
   principalBalance: string;
   total: string;
@@ -146,7 +159,7 @@ export interface LedgerSnapshot {
   versions: ScheduleVersionView[];
   current: ScheduleVersionView;
   results: EventResult[];
-  totals: { principalPaid: string; interestPaid: string; lateInterestPaid: string };
+  totals: { principalPaid: string; interestPaid: string; lateInterestPaid: string; insurancePaid: string };
 }
 
 /* ------------------------------------------------------------------ */
@@ -164,6 +177,8 @@ interface WInst {
   closingBalance: Decimal;
   paidPrincipal: Decimal;
   paidInterest: Decimal;
+  insurance: Decimal;
+  paidInsurance: Decimal;
   lateAccrued: Decimal;
   paidLate: Decimal;
   lateThrough: DateStr | null;
@@ -295,6 +310,8 @@ export class LoanLedger {
       ...s,
       paidPrincipal: ZERO,
       paidInterest: ZERO,
+      insurance: this.insurance,
+      paidInsurance: ZERO,
       lateAccrued: ZERO,
       paidLate: ZERO,
       lateThrough: null,
@@ -307,7 +324,19 @@ export class LoanLedger {
   }
 
   private remaining(i: WInst): Decimal {
-    return i.lateAccrued.minus(i.paidLate).plus(i.interest.minus(i.paidInterest)).plus(i.principal.minus(i.paidPrincipal));
+    return i.lateAccrued
+      .minus(i.paidLate)
+      .plus(i.insurance.minus(i.paidInsurance))
+      .plus(i.interest.minus(i.paidInterest))
+      .plus(i.principal.minus(i.paidPrincipal));
+  }
+
+  /** Seguro mensual del contrato (0 si no tiene) */
+  private get insurance(): Decimal {
+    const v = this.c.insuranceMonthly;
+    if (v === undefined || v === null || v === '') return ZERO;
+    const d = D(v);
+    return d.gt(0) ? money(d, this.rounding) : ZERO;
   }
 
   private isPaid(i: WInst): boolean {
@@ -356,7 +385,7 @@ export class LoanLedger {
     }
   }
 
-  /** Aplica `amount` a una cuota en orden: mora → interés → capital. Devuelve el sobrante. */
+  /** Aplica `amount` a una cuota en orden: mora → seguro → interés → capital. Devuelve el sobrante. */
   private payInto(i: WInst, amount: Decimal, allocs: Allocation[]): Decimal {
     let left = amount;
     const late = minDec(left, i.lateAccrued.minus(i.paidLate));
@@ -364,6 +393,12 @@ export class LoanLedger {
       i.paidLate = i.paidLate.plus(late);
       left = left.minus(late);
       allocs.push({ concept: 'LATE_INTEREST', installmentNumber: i.number, amount: fmt(late) });
+    }
+    const insurance = minDec(left, i.insurance.minus(i.paidInsurance));
+    if (insurance.gt(0)) {
+      i.paidInsurance = i.paidInsurance.plus(insurance);
+      left = left.minus(insurance);
+      allocs.push({ concept: 'INSURANCE', installmentNumber: i.number, amount: fmt(insurance) });
     }
     const interest = minDec(left, i.interest.minus(i.paidInterest));
     if (interest.gt(0)) {
@@ -546,13 +581,15 @@ export class LoanLedger {
     this.accrueLate(d);
     let late = ZERO;
     let interest = ZERO;
+    let insurance = ZERO;
     for (const i of this.live()) {
       if (cmp(i.dueDate, d) > 0) break;
       late = late.plus(i.lateAccrued.minus(i.paidLate));
       interest = interest.plus(i.interest.minus(i.paidInterest));
+      insurance = insurance.plus(i.insurance.minus(i.paidInsurance));
     }
     const acc = this.accruedCurrent(d).amount;
-    const total = late.plus(interest).plus(acc).plus(this.principalBalance);
+    const total = late.plus(insurance).plus(interest).plus(acc).plus(this.principalBalance);
     // restaurar
     this.active = snapshotActive;
     this.versions[this.versions.length - 1].installments = this.active;
@@ -561,6 +598,7 @@ export class LoanLedger {
       date: d,
       overdueLateInterest: fmt(late),
       overdueInterest: fmt(interest),
+      overdueInsurance: fmt(insurance),
       accruedInterest: fmt(acc),
       principalBalance: fmt(balance),
       total: fmt(total),
@@ -606,7 +644,9 @@ export class LoanLedger {
     const overdueCharges = sumDec(
       pending
         .filter((i) => cmp(i.dueDate, ev.date) <= 0)
-        .map((i) => i.interest.minus(i.paidInterest).plus(i.lateAccrued.minus(i.paidLate))),
+        .map((i) =>
+          i.interest.minus(i.paidInterest).plus(i.lateAccrued.minus(i.paidLate)).plus(i.insurance.minus(i.paidInsurance)),
+        ),
     );
     const acc = this.accruedCurrent(ev.date).amount;
     const capitalized = overdueCharges.plus(acc);
@@ -646,7 +686,7 @@ export class LoanLedger {
     if (i.terminal) return i.terminal;
     if (this.isPaid(i)) return 'PAID';
     if (cmp(i.dueDate, asOf) < 0) return 'OVERDUE';
-    if (i.paidPrincipal.plus(i.paidInterest).plus(i.paidLate).gt(0)) return 'PARTIAL';
+    if (i.paidPrincipal.plus(i.paidInterest).plus(i.paidLate).plus(i.paidInsurance).gt(0)) return 'PARTIAL';
     return 'PENDING';
   }
 
@@ -665,8 +705,11 @@ export class LoanLedger {
       interest: fmt(i.interest),
       payment: fmt(i.payment),
       closingBalance: fmt(i.closingBalance),
+      insurance: fmt(i.insurance),
+      totalPayment: fmt(i.payment.plus(i.insurance)),
       paidPrincipal: fmt(i.paidPrincipal),
       paidInterest: fmt(i.paidInterest),
+      paidInsurance: fmt(i.paidInsurance),
       lateInterestAccrued: fmt(i.lateAccrued),
       paidLateInterest: fmt(i.paidLate),
       daysOverdue: this.daysOverdue(i, asOf),
@@ -699,6 +742,7 @@ export class LoanLedger {
         principalPaid: sumOf(['PRINCIPAL', 'PREPAYMENT_PRINCIPAL']),
         interestPaid: sumOf(['INTEREST', 'ACCRUED_INTEREST']),
         lateInterestPaid: sumOf(['LATE_INTEREST']),
+        insurancePaid: sumOf(['INSURANCE']),
       },
     };
   }

@@ -43,20 +43,22 @@ export function localHour(timeZone: string, now = new Date()): number {
 const vehicleLabel = (v?: { brand: string; model: string; year: number } | null) =>
   v ? `${v.brand} ${v.model} ${v.year}` : null;
 
-/** Saldo pendiente de una cuota (capital + interés + mora no pagados) */
+/** Saldo pendiente de una cuota (capital + interés + seguro + mora no pagados) */
 const amountDue = (i: InstallmentView) =>
   fmt(
-    D(i.payment)
+    D(i.totalPayment)
       .minus(i.paidPrincipal)
       .minus(i.paidInterest)
+      .minus(i.paidInsurance)
       .plus(i.lateInterestAccrued)
       .minus(i.paidLateInterest),
   );
 
 const isOpen = (i: InstallmentView) => i.status === 'PENDING' || i.status === 'PARTIAL' || i.status === 'OVERDUE';
 
-/** Saldo de capital + interés de la cuota, sin la mora */
-const installmentBalance = (i: InstallmentView) => fmt(D(i.payment).minus(i.paidPrincipal).minus(i.paidInterest));
+/** Saldo de capital + interés + seguro de la cuota, sin la mora */
+const installmentBalance = (i: InstallmentView) =>
+  fmt(D(i.totalPayment).minus(i.paidPrincipal).minus(i.paidInterest).minus(i.paidInsurance));
 const lateFeeDue = (i: InstallmentView) => fmt(D(i.lateInterestAccrued).minus(i.paidLateInterest));
 
 function lateFeeRule(loan: { lateFeeType: string; lateFeeAmount: { toString(): string } | null; lateRateMonthly: { toString(): string } | null }) {
@@ -80,8 +82,9 @@ export class NotificationsService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    this.events.on('lead.created', ({ leadId }) => this.notifyLeadCreated(leadId));
-    this.events.on('loan.activated', ({ loanId }) => this.notifyLoanActivated(loanId));
+    // Carga inicial (silent): sin correos al cliente ni a administración
+    this.events.on('lead.created', ({ leadId, silent }) => (silent ? undefined : this.notifyLeadCreated(leadId)));
+    this.events.on('loan.activated', ({ loanId, silent }) => (silent ? undefined : this.notifyLoanActivated(loanId)));
     this.events.on('payment.registered', ({ paymentId }) => this.notifyPaymentRegistered(paymentId));
   }
 
@@ -90,8 +93,8 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
-   * Envía un correo al cliente y, si salió (o falló) de verdad, una copia aparte a cada ADMIN activo de la
-   * empresa (fase 2, punto 3). Mismo remitente; cada copia queda en NotificationLog con plantilla
+   * Envía un correo al cliente y, si salió, falló o el cliente no tiene correo (NO_RECIPIENT), una copia aparte
+   * a cada ADMIN activo de la empresa (fase 2, punto 3). Sin correo del cliente, los ADMIN reciben el aviso igual. Mismo remitente; cada copia queda en NotificationLog con plantilla
    * "<plantilla>.admin-copy". Un error en las copias nunca afecta el correo del cliente.
    * `exclude`: correos que ya recibieron su propio aviso del evento (p. ej. la lista de personal).
    */
@@ -100,7 +103,7 @@ export class NotificationsService implements OnModuleInit {
     // SKIPPED = ya enviado antes (deduplicado) o correo deshabilitado: no se repite la copia
     if (result.status === 'SKIPPED') return result;
     try {
-      const skip = new Set([mail.to, ...exclude].map((e) => e.toLowerCase()));
+      const skip = new Set([mail.to ?? '', ...exclude].filter(Boolean).map((e) => e.toLowerCase()));
       const admins = await this.prisma.user.findMany({
         where: { role: UserRole.ADMIN, isActive: true },
         select: { email: true },
@@ -200,6 +203,8 @@ export class NotificationsService implements OnModuleInit {
     if (!payment || payment.isReversed) return;
 
     const { loan, snapshot } = await this.finance.getLoanLedgerSnapshot(payment.loanId);
+    // Carga inicial: los pagos históricos no generan correos mientras los avisos estén pausados
+    if (loan.notificationsPaused) return;
     const next = snapshot.current.installments.find(isOpen);
 
     await this.notifyCustomer(`Se registró el pago ${payment.code} de ${loan.customer.fullName} en el crédito ${loan.code}`, {
@@ -221,9 +226,9 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /** Envío manual del estado de cuenta en PDF (al correo del cliente o a uno indicado). */
-  async sendAccountStatement(loanId: string, to?: string): Promise<MailResult & { to: string }> {
+  async sendAccountStatement(loanId: string, to?: string): Promise<MailResult & { to: string | null }> {
     const { loan, snapshot } = await this.finance.getLoanLedgerSnapshot(loanId);
-    const recipient = to || loan.customer.email;
+    const recipient = to || loan.customer.email || null;
     const pdf = await this.pdf.generateAccountStatementPdf(loan.id);
     const result = await this.notifyCustomer(`Se envió el estado de cuenta del crédito ${loan.code} de ${loan.customer.fullName}`, {
       to: recipient,
@@ -301,7 +306,11 @@ export class NotificationsService implements OnModuleInit {
     const cfg = await this.settings.getCollectionSettings();
     const reminderTarget = addDays(today, cfg.reminderDaysBefore);
 
-    const loans = await this.prisma.loan.findMany({ where: { status: LoanStatus.ACTIVE }, select: { id: true } });
+    // Los créditos con avisos pausados (carga inicial con pagos históricos pendientes) no reciben cobranza
+    const loans = await this.prisma.loan.findMany({
+      where: { status: LoanStatus.ACTIVE, notificationsPaused: false },
+      select: { id: true },
+    });
     let reminders = 0;
     let overdueNotices = 0;
 

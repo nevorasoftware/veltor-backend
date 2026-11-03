@@ -12,7 +12,7 @@ import {
   InstallmentStatus,
   LateFeeType,
 } from '@prisma/client';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMinSize,
   IsArray,
@@ -33,7 +33,7 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import Decimal from 'decimal.js';
-import { generateSchedule, todayInTz, addMonths, firstDueDateForDay, fmt } from '../finance/engine';
+import { generateSchedule, todayInTz, addMonths, firstDueDateForDay, fmt, isValidDate } from '../finance/engine';
 import { SettingsService } from '../settings/settings.service';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
 import { DomainEvents } from '../common/domain-events';
@@ -50,8 +50,11 @@ export class CreateLeadDto {
   @MaxLength(30)
   phone!: string;
 
+  /** Opcional: prospectos/clientes sin correo (no reciben correos; las copias van a los ADMIN) */
+  @Transform(({ value }) => (typeof value === 'string' && value.trim() === '' ? undefined : value))
   @IsEmail()
-  email!: string;
+  @IsOptional()
+  email?: string;
 
   @IsString()
   @IsOptional()
@@ -81,6 +84,11 @@ export class CreateLeadDto {
 
   @IsBoolean()
   privacyAccepted!: boolean;
+
+  /** Carga inicial por el personal: no envía correos (solo se respeta con sesión de personal) */
+  @IsBoolean()
+  @IsOptional()
+  initialLoad?: boolean;
 }
 
 export class UpdateLeadDto {
@@ -227,11 +235,61 @@ export class ConvertLeadToLoanDto {
   @IsOptional()
   lateFeeAmount?: number;
 
+  /**
+   * Expediente: obligatorio con los 5 documentos, salvo en carga inicial (initialLoad), donde es opcional.
+   * La regla de los 5 documentos se valida en el servicio.
+   */
   @IsArray()
-  @ArrayMinSize(5)
+  @IsOptional()
   @ValidateNested({ each: true })
   @Type(() => DocumentUploadInput)
-  documents!: DocumentUploadInput[];
+  documents?: DocumentUploadInput[];
+
+  /** Fecha de la PRIMERA cuota (AAAA-MM-DD). El día de pago se deriva de ella (p. ej. 2026-07-10 → día 10). */
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'firstPaymentDate debe tener el formato AAAA-MM-DD' })
+  @IsOptional()
+  firstPaymentDate?: string;
+
+  /**
+   * Fecha de desembolso (AAAA-MM-DD). Por defecto hoy; en carga inicial con firstPaymentDate, un mes antes de
+   * la primera cuota (así la primera cuota es un periodo completo y coincide con la cuota nivelada).
+   */
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'disbursementDate debe tener el formato AAAA-MM-DD' })
+  @IsOptional()
+  disbursementDate?: string;
+
+  /** Tasa ANUAL nominal en porcentaje (36 = 36 % anual = 3 % mensual; 0 = sin interés). Reemplaza a monthlyRate. */
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(120)
+  @IsOptional()
+  annualRate?: number;
+
+  /** Monto financiado. Si se indica, la prima es precio del vehículo − monto financiado. */
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  @IsOptional()
+  principal?: number;
+
+  /** Seguro mensual que se suma a cada cuota como concepto aparte (USD). */
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(10000)
+  @IsOptional()
+  insuranceMonthly?: number;
+
+  /**
+   * Carga inicial de un crédito que ya está en curso: no envía los correos de creación/formalización (cliente
+   * ni administración), permite fechas pasadas y no exige los documentos ni los rangos del producto (prima,
+   * plazo). El crédito queda con su atraso real: las cuotas vencidas quedan vencidas, la mora se calcula según
+   * sus parámetros y la cobranza diaria avisa a los ADMIN como en cualquier otro crédito.
+   */
+  @IsBoolean()
+  @IsOptional()
+  initialLoad?: boolean;
 
   @IsString()
   @IsOptional()
@@ -258,7 +316,7 @@ export class LeadsService {
     }
   }
 
-  async createPublicLead(dto: CreateLeadDto) {
+  async createPublicLead(dto: CreateLeadDto, silent = false) {
     if (!dto.privacyAccepted) {
       throw new BadRequestException('Debe aceptar el aviso de privacidad y consentimiento para tratamiento de datos.');
     }
@@ -279,7 +337,7 @@ export class LeadsService {
           code,
           fullName: dto.fullName.trim(),
           phone: dto.phone.trim(),
-          email: dto.email.toLowerCase().trim(),
+          email: dto.email ? dto.email.toLowerCase().trim() : null,
           message: dto.message,
           source: dto.source || LeadSource.CATALOG_REQUEST,
           status: LeadStatus.NEW,
@@ -291,7 +349,7 @@ export class LeadsService {
       });
     });
 
-    this.events.emit('lead.created', { leadId: lead.id });
+    this.events.emit('lead.created', { leadId: lead.id, silent });
     // Respuesta pública mínima: no se devuelven datos internos
     return { code: lead.code, createdAt: lead.createdAt };
   }
@@ -338,9 +396,10 @@ export class LeadsService {
     });
   }
 
-  private validateDocuments(documents: DocumentUploadInput[]) {
+  private validateDocuments(documents: DocumentUploadInput[], requireAll = true) {
     const categories = documents.map((d) => d.category);
     const missingDocs: string[] = [];
+    if (!requireAll) return this.decodeDocuments(documents);
     if (!categories.includes(DocumentCategory.DUI_FRONT) && !categories.includes(DocumentCategory.DUI_BACK)) missingDocs.push('DUI');
     if (!categories.includes(DocumentCategory.NIT)) missingDocs.push('NIT');
     if (!categories.includes(DocumentCategory.DRIVER_LICENSE)) missingDocs.push('Licencia de Conducir');
@@ -352,7 +411,10 @@ export class LeadsService {
         `Faltan documentos obligatorios: ${missingDocs.join(', ')}. No es posible activar el crédito sin el expediente completo de 5 documentos.`,
       );
     }
+    return this.decodeDocuments(documents);
+  }
 
+  private decodeDocuments(documents: DocumentUploadInput[]) {
     return documents.map((doc) => {
       if (!ALLOWED_DOCUMENT_MIME_TYPES.includes(doc.mimeType)) {
         throw new BadRequestException(`Tipo de archivo no permitido para ${doc.fileName}. Use PDF, JPG, PNG o WEBP.`);
@@ -378,7 +440,8 @@ export class LeadsService {
       throw new ConflictException('Este prospecto ya fue formalizado a crédito.');
     }
 
-    const documents = this.validateDocuments(dto.documents);
+    const initialLoad = !!dto.initialLoad;
+    const documents = this.validateDocuments(dto.documents ?? [], !initialLoad);
 
     // Vehículo: obligatorio y disponible (nunca se asigna uno arbitrario)
     const vehicleId = dto.vehicleId || lead.vehicleId;
@@ -397,14 +460,21 @@ export class LeadsService {
 
     // Parámetros del crédito
     const vehiclePrice = new Decimal(vehicle.salePrice.toString());
-    const downPayment = new Decimal(
-      dto.downPayment ?? (lead.estimatedDown !== null ? lead.estimatedDown.toString() : vehicle.minDownPayment.toString()),
-    );
+    const downPayment =
+      dto.principal !== undefined
+        ? vehiclePrice.minus(dto.principal)
+        : new Decimal(
+            dto.downPayment ?? (lead.estimatedDown !== null ? lead.estimatedDown.toString() : vehicle.minDownPayment.toString()),
+          );
+    if (downPayment.lt(0)) {
+      throw new BadRequestException('El monto financiado no puede ser mayor al precio del vehículo.');
+    }
     if (downPayment.gte(vehiclePrice)) {
       throw new BadRequestException('La prima debe ser menor al precio del vehículo.');
     }
     const minDown = vehiclePrice.mul(product.minDownPercent.toString()).div(100).toDecimalPlaces(2);
-    if (downPayment.lt(minDown)) {
+    // En carga inicial el contrato ya existe: no se reevalúan prima ni plazo contra el producto actual
+    if (!initialLoad && downPayment.lt(minDown)) {
       throw new BadRequestException(
         `La prima mínima para este producto es ${product.minDownPercent.toString()}% (${fmt(minDown)} USD).`,
       );
@@ -412,16 +482,31 @@ export class LeadsService {
     const principal = vehiclePrice.minus(downPayment).toDecimalPlaces(2);
 
     const termCount = dto.termMonths ?? lead.termMonths ?? product.minTermMonths;
-    if (termCount < product.minTermMonths || termCount > product.maxTermMonths) {
+    if (!initialLoad && (termCount < product.minTermMonths || termCount > product.maxTermMonths)) {
       throw new BadRequestException(
         `El plazo debe estar entre ${product.minTermMonths} y ${product.maxTermMonths} meses.`,
       );
     }
-    const monthlyRate = new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString());
+    // Tasa: anual nominal (36 % → 0.03 mensual) o mensual en decimal; si no, la del producto
+    const monthlyRate =
+      dto.annualRate !== undefined
+        ? new Decimal(dto.annualRate).div(1200)
+        : new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString());
+    // La tasa se guarda con 4 decimales (Decimal(6,4)); si no cabe exacta, las cuotas guardadas no cuadrarían
+    if (!monthlyRate.equals(monthlyRate.toDecimalPlaces(4))) {
+      throw new BadRequestException(
+        `La tasa mensual resultante (${monthlyRate.toString()}) tiene más de 4 decimales. Use una tasa anual múltiplo de 0.12 %.`,
+      );
+    }
+    const insurance = dto.insuranceMonthly && dto.insuranceMonthly > 0 ? new Decimal(dto.insuranceMonthly).toDecimalPlaces(2) : null;
 
     // Día de pago y mora: lo indicado al aperturar o, si no, los parámetros de cobranza
     const collection = await this.settings.getCollectionSettings();
-    const paymentDay = dto.paymentDay ?? collection.defaultPaymentDay ?? null;
+    if (dto.firstPaymentDate && !isValidDate(dto.firstPaymentDate)) throw new BadRequestException('firstPaymentDate no es una fecha válida.');
+    if (dto.disbursementDate && !isValidDate(dto.disbursementDate)) throw new BadRequestException('disbursementDate no es una fecha válida.');
+    // Con primera cuota explícita, el día de pago sale de ella (los días 29-31 se manejan como fin de mes)
+    const explicitDay = dto.firstPaymentDate ? Number(dto.firstPaymentDate.slice(8, 10)) : null;
+    const paymentDay = explicitDay !== null ? (explicitDay <= 28 ? explicitDay : null) : dto.paymentDay ?? collection.defaultPaymentDay ?? null;
     const lateFeeType = dto.lateFeeType ?? collection.defaultLateFeeType;
     const lateFeeAmount =
       lateFeeType === LateFeeType.NONE
@@ -434,8 +519,16 @@ export class LeadsService {
       throw new BadRequestException('Indique el monto de la mora o seleccione "Sin mora".');
     }
 
-    const disbursementDate = todayInTz();
-    const firstDueDate = paymentDay ? firstDueDateForDay(disbursementDate, paymentDay) : addMonths(disbursementDate, 1);
+    const disbursementDate =
+      dto.disbursementDate ?? (dto.firstPaymentDate && initialLoad ? addMonths(dto.firstPaymentDate, -1) : todayInTz());
+    const firstDueDate =
+      dto.firstPaymentDate ?? (paymentDay ? firstDueDateForDay(disbursementDate, paymentDay) : addMonths(disbursementDate, 1));
+    if (firstDueDate <= disbursementDate) {
+      throw new BadRequestException('La primera cuota debe ser posterior a la fecha de desembolso.');
+    }
+    if (!initialLoad && disbursementDate < todayInTz()) {
+      throw new BadRequestException('La fecha de desembolso no puede ser pasada; para créditos ya en curso use initialLoad.');
+    }
 
     const schedule = generateSchedule({
       principal,
@@ -467,9 +560,9 @@ export class LeadsService {
 
       const result = await withUniqueRetry(() =>
         this.prisma.$transaction(async (tx) => {
-          // Cliente: reutilizar si ya existe por DUI o correo
+          // Cliente: reutilizar si ya existe por DUI o correo (sin correo, solo por DUI)
           let customer = await tx.customer.findFirst({
-            where: { OR: [{ dui: dto.dui }, { email: lead.email }] },
+            where: { OR: lead.email ? [{ dui: dto.dui }, { email: lead.email }] : [{ dui: dto.dui }] },
           });
 
           if (customer) {
@@ -548,6 +641,8 @@ export class LeadsService {
               lateFeeType,
               lateFeeAmount: lateFeeAmount?.toFixed(2) ?? null,
               paymentDay,
+              insuranceMonthly: insurance ? insurance.toFixed(2) : null,
+              notificationsPaused: false,
               disbursementDate: new Date(disbursementDate),
               firstDueDate: new Date(firstDueDate),
               status: LoanStatus.ACTIVE,
@@ -579,6 +674,7 @@ export class LeadsService {
               scheduledInterest: inst.interest.toFixed(2),
               scheduledPayment: inst.payment.toFixed(2),
               closingBalance: inst.closingBalance.toFixed(2),
+              scheduledInsurance: insurance ? insurance.toFixed(2) : '0',
               status: InstallmentStatus.PENDING,
             })),
           });
@@ -608,7 +704,7 @@ export class LeadsService {
       );
 
       this.logger.log(`Crédito ${result.loan.code} activado para cliente ${result.customer.fullName}`);
-      this.events.emit('loan.activated', { loanId: result.loan.id });
+      this.events.emit('loan.activated', { loanId: result.loan.id, silent: initialLoad });
 
       return {
         success: true,
@@ -616,6 +712,9 @@ export class LeadsService {
         loan: result.loan,
         customer: result.customer,
         levelPayment: schedule.installments[0]?.payment.toFixed(2),
+        insuranceMonthly: insurance ? insurance.toFixed(2) : null,
+        totalInstallment: schedule.installments[0] ? schedule.installments[0].payment.plus(insurance ?? 0).toFixed(2) : null,
+        initialLoad,
         documentsUploaded: documents.length,
       };
     } catch (err) {

@@ -1,10 +1,10 @@
-import { Controller, Get, Post, Body, Param, Query, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, Query, Request } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { FinanceService } from './finance.service';
 import { PaymentKind, PaymentMethod, UserRole } from '@prisma/client';
 import { Roles } from '../auth/roles.decorator';
 import { PrepaymentPolicy } from './engine';
-import { IsEnum, IsNotEmpty, IsNumberString, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsNotEmpty, IsNumberString, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class RegisterPaymentDto {
   @IsString()
@@ -41,6 +41,11 @@ export class RegisterPaymentDto {
   idempotencyKey!: string;
 }
 
+export class LoanNotificationsDto {
+  @IsBoolean()
+  paused!: boolean;
+}
+
 export class ReversePaymentDto {
   @IsString()
   @IsNotEmpty()
@@ -74,6 +79,13 @@ export class FinanceController {
       ...dto,
       registeredById: req.user.id,
     });
+  }
+
+  @Patch('loans/:id/notifications')
+  @ApiOperation({ summary: 'Pausar o reanudar los avisos de cobranza y correos al cliente de un crédito (carga inicial)' })
+  @Roles(UserRole.ADMIN)
+  async setNotifications(@Param('id') id: string, @Body() dto: LoanNotificationsDto) {
+    return this.financeService.setNotificationsPaused(id, dto.paused);
   }
 
   @Post('payments/:id/reverse')

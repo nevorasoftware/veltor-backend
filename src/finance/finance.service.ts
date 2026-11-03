@@ -41,6 +41,7 @@ export class FinanceService {
         loan.lateFeeType !== 'NONE' && loan.lateFeeAmount
           ? { type: loan.lateFeeType, amount: loan.lateFeeAmount.toFixed(2) }
           : null,
+      insuranceMonthly: loan.insuranceMonthly ? loan.insuranceMonthly.toFixed(2) : null,
     };
   }
 
@@ -240,6 +241,19 @@ export class FinanceService {
       payment,
       result,
       newPrincipalBalance: ledger.balance,
+    };
+  }
+
+  /** Pausa o reanuda los avisos de cobranza y correos al cliente de un crédito (carga inicial) */
+  async setNotificationsPaused(loanId: string, paused: boolean) {
+    const loan = await this.findLoan(loanId);
+    await this.prisma.loan.update({ where: { id: loan.id }, data: { notificationsPaused: paused } });
+    return {
+      success: true,
+      loanId: loan.id,
+      code: loan.code,
+      notificationsPaused: paused,
+      message: paused ? 'Avisos y correos del crédito pausados.' : 'Avisos y correos del crédito reanudados.',
     };
   }
 

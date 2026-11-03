@@ -4,8 +4,10 @@ import { TenantContext } from '../tenant/tenant-context';
 
 /** Eventos de negocio que otros módulos (p. ej. notificaciones) escuchan sin acoplarse al emisor. */
 export interface DomainEventMap {
-  'lead.created': { leadId: string };
-  'loan.activated': { loanId: string };
+  /** silent: carga inicial (no se avisa al prospecto ni a administración) */
+  'lead.created': { leadId: string; silent?: boolean };
+  /** silent: carga inicial de un crédito ya en curso (no se envían correos; Drive sí se archiva) */
+  'loan.activated': { loanId: string; silent?: boolean };
   'payment.registered': { paymentId: string };
 }
 

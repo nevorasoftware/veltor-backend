@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PersonType, CustomerStatus, Prisma, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
@@ -62,10 +62,12 @@ export class CustomersService {
   }
 
   async create(dto: CreateCustomerDto) {
-    const email = dto.email.toLowerCase().trim();
-    const existing = await this.prisma.customer.findFirst({
-      where: { OR: [{ dui: dto.dui }, { email }] },
-    });
+    const email = dto.email ? dto.email.toLowerCase().trim() : null;
+    // Solo se busca por los datos que vienen: un { email: undefined } dentro de OR coincidiría con todos
+    const duplicateBy: Prisma.CustomerWhereInput[] = [];
+    if (dto.dui) duplicateBy.push({ dui: dto.dui });
+    if (email) duplicateBy.push({ email });
+    const existing = duplicateBy.length ? await this.prisma.customer.findFirst({ where: { OR: duplicateBy } }) : null;
     if (existing) {
       throw new ConflictException('Ya existe un cliente registrado con ese DUI o correo electrónico');
     }
@@ -106,7 +108,7 @@ export class CustomersService {
       where: { id },
       data: {
         ...dto,
-        email: dto.email?.toLowerCase().trim(),
+        email: dto.email === undefined ? undefined : dto.email ? dto.email.toLowerCase().trim() : null,
         birthDate: dto.birthDate ? new Date(dto.birthDate) : undefined,
       },
     });
@@ -120,6 +122,9 @@ export class CustomersService {
     });
     if (!customer) throw new NotFoundException('Cliente no encontrado');
 
+    if (!customer.email) {
+      throw new BadRequestException('El cliente no tiene correo registrado: agréguelo antes de habilitar el portal.');
+    }
     const email = customer.email.toLowerCase().trim();
     // El correo de acceso es único en toda la plataforma (no solo en la empresa)
     const emailOwner = await this.prisma.unscoped.user.findUnique({ where: { email } });

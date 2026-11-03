@@ -159,7 +159,7 @@ export function leadReceivedMail(p: { fullName: string; code: string; vehicle?: 
 export function leadStaffAlertMail(p: {
   fullName: string;
   code: string;
-  email: string;
+  email: string | null;
   phone: string;
   vehicle?: string | null;
   message?: string | null;
@@ -167,7 +167,7 @@ export function leadStaffAlertMail(p: {
   const title = `Nuevo prospecto ${p.code}`;
   const rows: Row[] = [
     ['Nombre', p.fullName],
-    ['Correo', p.email],
+    ['Correo', p.email || '(sin correo)'],
     ['Teléfono', p.phone],
   ];
   if (p.vehicle) rows.push(['Vehículo', p.vehicle]);
@@ -214,7 +214,7 @@ export function loanApprovedMail(p: {
 
 export function loanApprovedStaffMail(p: {
   fullName: string;
-  email: string;
+  email: string | null;
   loanCode: string;
   vehicle: string;
   principal: string;
@@ -226,7 +226,7 @@ export function loanApprovedStaffMail(p: {
   const title = `Crédito ${p.loanCode} aprobado`;
   const rows: Row[] = [
     ['Cliente', p.fullName],
-    ['Correo', p.email],
+    ['Correo', p.email || '(sin correo)'],
     ['Vehículo', p.vehicle],
     ['Monto financiado', usd(p.principal)],
     ['Cuota mensual', usd(p.installment)],
@@ -412,9 +412,11 @@ export function platformAccessMail(p: { email: string; temporaryPassword: string
 }
 
 /** Copia para los ADMIN de la empresa de un correo enviado al cliente */
-export function adminCopyMail(p: { summary: string; customerEmail: string; original: RenderedMail }): RenderedMail {
+export function adminCopyMail(p: { summary: string; customerEmail: string | null; original: RenderedMail }): RenderedMail {
   const title = p.summary;
-  const intro = `Copia para administración: se envió al cliente (${p.customerEmail}) el correo "${p.original.subject}".`;
+  const intro = p.customerEmail
+    ? `Copia para administración: se envió al cliente (${p.customerEmail}) el correo "${p.original.subject}".`
+    : `Aviso para administración: el cliente no tiene correo registrado, así que no se le envió "${p.original.subject}". Este es el contenido:`;
   return {
     subject: `${brand()} [copia]: ${p.summary}`,
     html: layout(title, `<p>${esc(intro)}</p><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;color:#334155;background:#F8FAFC;padding:12px;border-radius:8px">${esc(p.original.text)}</pre>`),

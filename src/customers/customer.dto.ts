@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { IsEmail, IsEnum, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Min } from 'class-validator';
 import { PartialType } from '@nestjs/swagger';
 import { CustomerStatus, PersonType } from '@prisma/client';
@@ -27,8 +27,11 @@ export class CreateCustomerDto {
   @IsNotEmpty()
   phone!: string;
 
+  /** Opcional: hay clientes sin correo (no reciben correos; las copias van a los ADMIN) */
+  @Transform(({ value }) => (typeof value === 'string' && value.trim() === '' ? undefined : value))
   @IsEmail()
-  email!: string;
+  @IsOptional()
+  email?: string;
 
   @IsString()
   @IsNotEmpty()

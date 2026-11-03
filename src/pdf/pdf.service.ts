@@ -87,6 +87,8 @@ export class PdfService {
       scheduledPrincipal: inst.principal,
       scheduledInterest: inst.interest,
       scheduledPayment: inst.payment,
+      insurance: inst.insurance,
+      totalPayment: inst.totalPayment,
       closingBalance: inst.closingBalance,
       status: inst.status,
     }));
@@ -126,21 +128,44 @@ export class PdfService {
 
       doc.text(`Monto Financiado: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 22);
       doc.text(`Tasa Mensual: ${(Number(loan.monthlyRate) * 100).toFixed(2)}%`, 310, boxTop + 34);
-      doc.text(`Plazo: ${loan.termCount} meses (${loan.frequency})`, 310, boxTop + 46);
+      doc.text(
+        `Plazo: ${loan.termCount} meses (${loan.frequency})${Number(loan.insuranceMonthly ?? 0) > 0 ? ` · Seguro: ${formatMoney(loan.insuranceMonthly)}/mes` : ''}`,
+        310,
+        boxTop + 46,
+      );
       doc.text(`Base de Cálculo: ${loan.dayCount}`, 310, boxTop + 58);
+
+      // Columnas de la tabla: con seguro se agrega la columna "Seguro" y "Cuota Total" = cuota + seguro
+      const hasInsurance = Number(loan.insuranceMonthly ?? 0) > 0;
+      type Col = { title: string; x: number; w: number; align: 'left' | 'center' | 'right'; bold?: boolean };
+      const columns: Col[] = hasInsurance
+        ? [
+            { title: '#', x: 40, w: 22, align: 'center' },
+            { title: 'Vencimiento', x: 64, w: 62, align: 'center' },
+            { title: 'Saldo Inicial', x: 128, w: 72, align: 'right' },
+            { title: 'Capital', x: 202, w: 66, align: 'right' },
+            { title: 'Interés', x: 270, w: 62, align: 'right' },
+            { title: 'Seguro', x: 334, w: 58, align: 'right' },
+            { title: 'Cuota Total', x: 394, w: 82, align: 'right', bold: true },
+            { title: 'Saldo Final', x: 478, w: 92, align: 'right' },
+          ]
+        : [
+            { title: '#', x: 42, w: 25, align: 'center' },
+            { title: 'Vencimiento', x: 72, w: 70, align: 'center' },
+            { title: 'Saldo Inicial', x: 148, w: 80, align: 'right' },
+            { title: 'Capital', x: 234, w: 75, align: 'right' },
+            { title: 'Interés', x: 315, w: 75, align: 'right' },
+            { title: 'Cuota Total', x: 396, w: 85, align: 'right', bold: true },
+            { title: 'Saldo Final', x: 487, w: 80, align: 'right' },
+          ];
+      const drawColumns = (y: number) => columns.forEach((col) => doc.text(col.title, col.x, y, { width: col.w, align: col.align }));
 
       // Encabezado de la tabla de cuotas
       let currentY = boxTop + 88;
       doc.rect(36, currentY, 540, 20).fillAndStroke(colorNightBlue, colorNightBlue);
 
       doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#FFFFFF');
-      doc.text('#', 42, currentY + 6, { width: 25, align: 'center' });
-      doc.text('Vencimiento', 72, currentY + 6, { width: 70, align: 'center' });
-      doc.text('Saldo Inicial', 148, currentY + 6, { width: 80, align: 'right' });
-      doc.text('Capital', 234, currentY + 6, { width: 75, align: 'right' });
-      doc.text('Interés', 315, currentY + 6, { width: 75, align: 'right' });
-      doc.text('Cuota Total', 396, currentY + 6, { width: 85, align: 'right' });
-      doc.text('Saldo Final', 487, currentY + 6, { width: 80, align: 'right' });
+      drawColumns(currentY + 6);
 
       currentY += 20;
 
@@ -158,13 +183,7 @@ export class PdfService {
           // Re-dibujar encabezado de tabla en página nueva
           doc.rect(36, currentY, 540, 20).fillAndStroke(colorNightBlue, colorNightBlue);
           doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#FFFFFF');
-          doc.text('#', 42, currentY + 6, { width: 25, align: 'center' });
-          doc.text('Vencimiento', 72, currentY + 6, { width: 70, align: 'center' });
-          doc.text('Saldo Inicial', 148, currentY + 6, { width: 80, align: 'right' });
-          doc.text('Capital', 234, currentY + 6, { width: 75, align: 'right' });
-          doc.text('Interés', 315, currentY + 6, { width: 75, align: 'right' });
-          doc.text('Cuota Total', 396, currentY + 6, { width: 85, align: 'right' });
-          doc.text('Saldo Final', 487, currentY + 6, { width: 80, align: 'right' });
+          drawColumns(currentY + 6);
           currentY += 20;
           doc.font('Helvetica').fontSize(7.5);
         }
@@ -175,13 +194,20 @@ export class PdfService {
         }
 
         doc.fillColor(colorGraphite);
-        doc.text(item.number.toString(), 42, currentY + 4, { width: 25, align: 'center' });
-        doc.text(new Date(item.dueDate).toISOString().split('T')[0], 72, currentY + 4, { width: 70, align: 'center' });
-        doc.text(formatMoney(item.openingBalance), 148, currentY + 4, { width: 80, align: 'right' });
-        doc.text(formatMoney(item.scheduledPrincipal), 234, currentY + 4, { width: 75, align: 'right' });
-        doc.text(formatMoney(item.scheduledInterest), 315, currentY + 4, { width: 75, align: 'right' });
-        doc.font('Helvetica-Bold').text(formatMoney(item.scheduledPayment), 396, currentY + 4, { width: 85, align: 'right' });
-        doc.font('Helvetica').text(formatMoney(item.closingBalance), 487, currentY + 4, { width: 80, align: 'right' });
+        const values = [
+          item.number.toString(),
+          new Date(item.dueDate).toISOString().split('T')[0],
+          formatMoney(item.openingBalance),
+          formatMoney(item.scheduledPrincipal),
+          formatMoney(item.scheduledInterest),
+          ...(hasInsurance ? [formatMoney(item.insurance)] : []),
+          formatMoney(item.totalPayment),
+          formatMoney(item.closingBalance),
+        ];
+        columns.forEach((col, idx) => {
+          doc.font(col.bold ? 'Helvetica-Bold' : 'Helvetica').text(values[idx], col.x, currentY + 4, { width: col.w, align: col.align });
+        });
+        doc.font('Helvetica');
 
         currentY += 16;
       }
@@ -234,7 +260,12 @@ export class PdfService {
       doc.text(`Monto Inicial: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 24);
       doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: ${formatMoney(snapshot.principalBalance)}`, 310, boxTop + 38);
       doc.font('Helvetica').fillColor(colorGraphite).text(`Total Abonado a la Fecha: ${formatMoney(totalPaid)}`, 310, boxTop + 52);
-      doc.text(`Próxima Cuota: ${nextPending ? `${formatMoney(nextPending.payment)} (${nextPending.dueDate})` : 'Crédito cancelado'}`, 310, boxTop + 66);
+      const insuranceNote = nextPending && Number(nextPending.insurance) > 0 ? ` incl. seguro ${formatMoney(nextPending.insurance)}` : '';
+      doc.text(
+        `Próxima Cuota: ${nextPending ? `${formatMoney(nextPending.totalPayment)}${insuranceNote} (${nextPending.dueDate})` : 'Crédito cancelado'}`,
+        310,
+        boxTop + 66,
+      );
 
       // Tabla de Historial de Pagos Recientes
       let currentY = boxTop + 105;

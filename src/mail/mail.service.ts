@@ -15,7 +15,8 @@ export interface MailAttachment {
 }
 
 export interface OutgoingMail {
-  to: string;
+  /** null/vacío: el cliente no tiene correo (se registra como "sin destinatario" y no se envía) */
+  to: string | null;
   subject: string;
   html: string;
   text: string;
@@ -26,8 +27,12 @@ export interface OutgoingMail {
   loanId?: string;
 }
 
+/** Texto que se guarda en NotificationLog cuando el cliente no tiene correo */
+export const NO_RECIPIENT_LABEL = '(sin correo)';
+
 export interface MailResult {
-  status: 'SENT' | 'SKIPPED' | 'FAILED';
+  /** NO_RECIPIENT: el destinatario no tiene correo; quedó registrado y no se envió nada */
+  status: 'SENT' | 'SKIPPED' | 'FAILED' | 'NO_RECIPIENT';
   error?: string;
 }
 
@@ -62,6 +67,13 @@ export class MailService {
   }
 
   async send(mail: OutgoingMail): Promise<MailResult> {
+    if (!mail.to?.trim()) {
+      const result: MailResult = { status: 'NO_RECIPIENT', error: 'Sin destinatario: el cliente no tiene correo registrado.' };
+      await this.record(mail, result).catch((err) =>
+        this.logger.error(`No se pudo registrar la notificación sin destinatario: ${err?.message || err}`),
+      );
+      return result;
+    }
     if (!this.isConfigured()) {
       if (!this.warnedUnconfigured) {
         this.logger.warn('Envío de correos deshabilitado: faltan las variables GMAIL_* o MAIL_ENABLED=false.');
@@ -110,7 +122,7 @@ export class MailService {
     }
     const info = await this.composer.sendMail({
       from: { name: fromName, address: process.env.GMAIL_SENDER! },
-      to: mail.to,
+      to: mail.to ?? undefined,
       replyTo: tenant?.contactEmail || undefined,
       subject: mail.subject,
       html: mail.html,
@@ -162,7 +174,7 @@ export class MailService {
       return;
     }
     const data = {
-      recipientEmail: mail.to,
+      recipientEmail: mail.to?.trim() || NO_RECIPIENT_LABEL,
       subject: mail.subject,
       templateName: mail.template,
       status: result.status === 'SENT' ? NotificationStatus.SENT : NotificationStatus.FAILED,
