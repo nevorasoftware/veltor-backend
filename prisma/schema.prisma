@@ -629,7 +629,7 @@ model Loan {
   originalPrincipal       Decimal @db.Decimal(12, 2)
   currentPrincipalBalance Decimal @db.Decimal(12, 2)
 
-  monthlyRate         Decimal            @db.Decimal(6, 4)
+  monthlyRate         Decimal            @db.Decimal(12, 10) // Tasa mensual con 10 decimales (p. ej. 40 % anual / 12)
   termCount           Int
   frequency           PaymentFrequency   @default(MONTHLY)
   dayCount            DayCountBasis      @default(D30_360)
@@ -677,7 +677,7 @@ model LoanContractVersion {
   reason           String // ORIGINAL, PREPAYMENT, RESTRUCTURE
   effectiveDate    DateTime          @db.Date
   principalBalance Decimal           @db.Decimal(12, 2)
-  monthlyRate      Decimal           @db.Decimal(6, 4)
+  monthlyRate      Decimal           @db.Decimal(12, 10)
   levelPayment     Decimal?          @db.Decimal(12, 2)
   policyApplied    PrepaymentPolicy?
   pdfDocumentUrl   String?
