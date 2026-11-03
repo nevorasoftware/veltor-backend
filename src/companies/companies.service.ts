@@ -1,5 +1,9 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { AmortizationMethod, Company, DayCountBasis, Prisma, UserRole } from '@prisma/client';
+import * as fs from 'fs';
+import * as path from 'path';
+import { DOCUMENTS_UPLOAD_DIR } from '../documents/documents.constants';
+import { DRIVE_KEY_PREFIX } from '../storage/google-drive.service';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
@@ -10,6 +14,7 @@ import { TenantContext } from '../tenant/tenant-context';
 import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import {
   CompanyBrandingDto,
+  CompanyProductDto,
   CreateCompanyDto,
   LOGO_MIME_TYPES,
   LogoDto,
@@ -17,7 +22,8 @@ import {
   UpdatePlatformCompanyDto,
 } from './company.dto';
 
-export const DEFAULT_PRODUCT_CODE = 'PROD-AUTO-ESTANDAR';
+/** Código del producto inicial de cada empresa (identificador interno, no un valor de negocio) */
+export const INITIAL_PRODUCT_CODE = 'PROD-001';
 
 /** Columnas de la empresa sin los bytes del logo */
 const COMPANY_SELECT = {
@@ -148,9 +154,10 @@ export class CompaniesService {
     return { ...toAdminView(company), admins };
   }
 
-  /** Crea la empresa, su producto financiero por defecto y su primer ADMIN (con correo de acceso). */
+  /** Crea la empresa, su producto financiero (con los valores del formulario) y su primer ADMIN. */
   async create(dto: CreateCompanyDto) {
-    const { adminEmail, adminName, ...fields } = dto;
+    const { adminEmail, adminName, product, ...fields } = dto;
+    this.assertProduct(product);
     await this.assertSlugFree(fields.slug);
     await this.assertEmailFree(adminEmail);
     if (fields.domains?.length) await this.assertDomainsFree(fields.domains);
@@ -158,7 +165,7 @@ export class CompaniesService {
     const company = await this.db.$transaction(async (tx) => {
       if (fields.isDefault) await tx.company.updateMany({ where: { isDefault: true }, data: { isDefault: false } });
       const created = await tx.company.create({ data: this.toData(fields) as Prisma.CompanyCreateInput });
-      await this.createDefaultProduct(tx, created.id);
+      await this.createProduct(tx, created.id, product);
       return created;
     });
     this.logger.log(`Empresa creada: ${company.slug} (${company.id})`);
@@ -254,65 +261,105 @@ export class CompaniesService {
   }
 
   // --------------------------------------------------------------------------
-  // Bootstrap
+  // Borrado de empresa (limpieza de pruebas)
   // --------------------------------------------------------------------------
-
-  /** Garantiza una empresa por defecto activa ('veltor' si no hay ninguna). */
-  async ensureDefaultCompany(): Promise<Company> {
-    const current = await this.db.company.findFirst({ where: { isDefault: true }, orderBy: { createdAt: 'asc' } });
-    if (current) return current;
-
-    const veltor = await this.db.company.findUnique({ where: { slug: 'veltor' } });
-    if (veltor) {
-      this.logger.warn('No había empresa por defecto: se marca "veltor" como predeterminada.');
-      return this.db.company.update({ where: { id: veltor.id }, data: { isDefault: true, isActive: true } });
-    }
-    const created = await this.db.$transaction(async (tx) => {
-      const c = await tx.company.create({ data: { slug: 'veltor', name: 'VELTOR', isDefault: true, isActive: true } });
-      await this.createDefaultProduct(tx, c.id);
-      return c;
-    });
-    this.logger.warn('Empresa por defecto "veltor" creada.');
-    return created;
-  }
 
   /**
-   * Completa una empresa sin producto financiero (p. ej. la empresa por defecto que creó la migración en una
-   * base vacía). No toca empresas que ya tienen productos.
+   * Borra una empresa con TODOS sus datos en una sola transacción, en orden de dependencias (las FK companyId
+   * son RESTRICT a propósito). Después envía a la papelera su carpeta de Drive y borra sus archivos locales;
+   * si eso falla, los datos ya quedaron borrados y solo se registra el error.
    */
-  async ensureProductFor(companyId: string) {
-    const count = await this.db.financingProduct.count({ where: { companyId } });
-    if (count === 0) {
-      await this.createDefaultProduct(this.db, companyId);
-      this.logger.log(`Producto financiero por defecto creado para la empresa ${companyId}.`);
+  async remove(id: string, confirmSlug: string) {
+    const company = await this.db.company.findUnique({ where: { id }, select: { id: true, slug: true, isDefault: true } });
+    if (!company) throw new NotFoundException('Empresa no encontrada');
+    if (confirmSlug?.trim().toLowerCase() !== company.slug) {
+      throw new BadRequestException('La confirmación no coincide con el slug de la empresa.');
     }
+    if (company.isDefault) throw new ConflictException('La empresa por defecto no se puede borrar.');
+
+    const localFiles = (
+      await this.db.customerDocument.findMany({ where: { companyId: id }, select: { fileKey: true } })
+    )
+      .map((d) => d.fileKey)
+      .filter((k) => !k.startsWith(DRIVE_KEY_PREFIX));
+
+    const where = { where: { companyId: id } };
+    const deleted: Record<string, number> = {};
+    await this.db.$transaction(
+      async (tx) => {
+        const steps: [string, () => Promise<{ count: number }>][] = [
+          ['paymentAllocations', () => tx.paymentAllocation.deleteMany(where)],
+          ['paymentReversals', () => tx.paymentReversal.deleteMany(where)],
+          ['paymentTransactions', () => tx.paymentTransaction.deleteMany(where)],
+          ['collectionActivities', () => tx.collectionActivity.deleteMany(where)],
+          ['collectionCases', () => tx.collectionCase.deleteMany(where)],
+          ['accountStatements', () => tx.accountStatement.deleteMany(where)],
+          ['amortizationInstallments', () => tx.amortizationInstallment.deleteMany(where)],
+          ['loanContractVersions', () => tx.loanContractVersion.deleteMany(where)],
+          ['loans', () => tx.loan.deleteMany(where)],
+          ['creditEvaluations', () => tx.creditEvaluation.deleteMany(where)],
+          ['creditApprovals', () => tx.creditApproval.deleteMany(where)],
+          ['financingApplications', () => tx.financingApplication.deleteMany(where)],
+          ['customerDocuments', () => tx.customerDocument.deleteMany(where)],
+          ['leads', () => tx.lead.deleteMany(where)],
+          ['vehicleStatusHistory', () => tx.vehicleStatusHistory.deleteMany(where)],
+          ['vehicleImages', () => tx.vehicleImage.deleteMany(where)],
+          ['vehicles', () => tx.vehicle.deleteMany(where)],
+          ['financingProducts', () => tx.financingProduct.deleteMany(where)],
+          ['notificationLogs', () => tx.notificationLog.deleteMany(where)],
+          ['auditLogs', () => tx.auditLog.deleteMany(where)],
+          ['systemSettings', () => tx.systemSetting.deleteMany(where)],
+          ['expenses', () => tx.expense.deleteMany(where)],
+          ['users', () => tx.user.deleteMany(where)],
+          ['customers', () => tx.customer.deleteMany(where)],
+        ];
+        for (const [name, step] of steps) deleted[name] = (await step()).count;
+        await tx.company.delete({ where: { id } });
+      },
+      { timeout: 120_000, maxWait: 10_000 },
+    );
+    this.logger.warn(`Empresa ${company.slug} borrada con todos sus datos: ${JSON.stringify(deleted)}`);
+
+    const drive = await this.drive.trashCompanyFolder(company.slug).catch((err: any) => ({ trashed: false, error: String(err?.message || err) }));
+    this.drive.forgetCompany(id);
+    let filesRemoved = 0;
+    for (const key of localFiles) {
+      try {
+        await fs.promises.unlink(path.join(DOCUMENTS_UPLOAD_DIR, path.basename(key)));
+        filesRemoved++;
+      } catch {
+        /* el archivo ya no existía */
+      }
+    }
+    return { success: true, slug: company.slug, deleted, drive, localFilesRemoved: filesRemoved };
   }
 
   // --------------------------------------------------------------------------
 
-  private async createDefaultProduct(db: Prisma.TransactionClient, companyId: string) {
-    const num = (name: string, fallback: number) => {
-      const v = Number(process.env[name]);
-      return Number.isFinite(v) && v > 0 ? v : fallback;
-    };
-    const defaultRate = num('PRODUCT_DEFAULT_MONTHLY_RATE', 0.015);
-    await db.financingProduct.upsert({
-      where: { companyId_code: { companyId, code: DEFAULT_PRODUCT_CODE } },
-      update: {},
-      create: {
+  /** min ≤ default ≤ max y plazo mínimo ≤ máximo */
+  private assertProduct(p: CompanyProductDto) {
+    if (!(p.minMonthlyRate <= p.defaultMonthlyRate && p.defaultMonthlyRate <= p.maxMonthlyRate)) {
+      throw new BadRequestException('La tasa por defecto debe estar entre la tasa mínima y la máxima.');
+    }
+    if (p.minTermMonths > p.maxTermMonths) throw new BadRequestException('El plazo mínimo no puede ser mayor al máximo.');
+  }
+
+  private async createProduct(db: Prisma.TransactionClient, companyId: string, p: CompanyProductDto) {
+    await db.financingProduct.create({
+      data: {
         companyId,
-        code: DEFAULT_PRODUCT_CODE,
-        name: process.env.PRODUCT_FINANCING_NAME || 'Crédito Vehicular Estándar',
-        minMonthlyRate: num('PRODUCT_MIN_MONTHLY_RATE', Math.min(0.012, defaultRate)),
-        maxMonthlyRate: num('PRODUCT_MAX_MONTHLY_RATE', Math.max(0.022, defaultRate)),
-        defaultMonthlyRate: defaultRate,
-        minTermMonths: num('PRODUCT_MIN_TERM_MONTHS', 12),
-        maxTermMonths: num('PRODUCT_MAX_TERM_MONTHS', 72),
-        minDownPercent: num('PRODUCT_MIN_DOWN_PERCENT', 15),
+        code: INITIAL_PRODUCT_CODE,
+        name: p.name,
+        minMonthlyRate: p.minMonthlyRate,
+        maxMonthlyRate: p.maxMonthlyRate,
+        defaultMonthlyRate: p.defaultMonthlyRate,
+        minTermMonths: p.minTermMonths,
+        maxTermMonths: p.maxTermMonths,
+        minDownPercent: p.minDownPercent,
         dayCountBasis: DayCountBasis.D30_360,
         method: AmortizationMethod.FRENCH,
-        graceDays: num('PRODUCT_GRACE_DAYS', 5),
-        lateRateMonthly: num('PRODUCT_LATE_MONTHLY_RATE', 0.03),
+        graceDays: p.graceDays,
+        lateRateMonthly: p.lateRateMonthly ?? null,
         isActive: true,
       },
     });

@@ -17,6 +17,21 @@ export class LoginDto {
   password!: string;
 }
 
+export class ForgotPasswordDto {
+  @IsEmail({}, { message: 'Debe ingresar un correo electrónico válido' })
+  email!: string;
+}
+
+export class ResetPasswordDto {
+  @IsString()
+  @IsNotEmpty({ message: 'El enlace de recuperación no es válido' })
+  token!: string;
+
+  @IsString()
+  @MinLength(10, { message: 'La nueva contraseña debe tener al menos 10 caracteres' })
+  newPassword!: string;
+}
+
 export class ChangePasswordDto {
   @IsString()
   @IsNotEmpty({ message: 'La contraseña actual es requerida' })
@@ -42,6 +57,26 @@ export class AuthController {
   @ApiOperation({ summary: 'Iniciar sesión (Panel Administrativo y Portal Cliente)' })
   async login(@Body() dto: LoginDto) {
     return this.authService.login(dto.email, dto.password);
+  }
+
+  @Public()
+  @SkipTenant()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Solicitar un enlace para restablecer la contraseña (siempre responde 200)' })
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto.email);
+  }
+
+  @Public()
+  @SkipTenant()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Restablecer la contraseña con el token recibido por correo' })
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto.token, dto.newPassword);
   }
 
   @Get('me')

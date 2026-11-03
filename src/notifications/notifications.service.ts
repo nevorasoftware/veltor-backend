@@ -1,9 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { LoanStatus } from '@prisma/client';
+import { LoanStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DomainEvents } from '../common/domain-events';
-import { MailService, MailResult } from '../mail/mail.service';
+import { MailService, MailResult, OutgoingMail } from '../mail/mail.service';
 import { FinanceService } from '../finance/finance.service';
 import { PdfService } from '../pdf/pdf.service';
 import { SettingsService } from '../settings/settings.service';
@@ -12,6 +12,7 @@ import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import { InstallmentView, addDays, todayInTz, D, fmt } from '../finance/engine';
 import {
   accountStatementMail,
+  adminCopyMail,
   leadReceivedMail,
   leadStaffAlertMail,
   loanApprovedMail,
@@ -88,20 +89,53 @@ export class NotificationsService implements OnModuleInit {
     return this.mail.isConfigured();
   }
 
+  /**
+   * Envía un correo al cliente y, si salió (o falló) de verdad, una copia aparte a cada ADMIN activo de la
+   * empresa (fase 2, punto 3). Mismo remitente; cada copia queda en NotificationLog con plantilla
+   * "<plantilla>.admin-copy". Un error en las copias nunca afecta el correo del cliente.
+   * `exclude`: correos que ya recibieron su propio aviso del evento (p. ej. la lista de personal).
+   */
+  private async notifyCustomer(summary: string, mail: OutgoingMail, exclude: string[] = []): Promise<MailResult> {
+    const result = await this.mail.send(mail);
+    // SKIPPED = ya enviado antes (deduplicado) o correo deshabilitado: no se repite la copia
+    if (result.status === 'SKIPPED') return result;
+    try {
+      const skip = new Set([mail.to, ...exclude].map((e) => e.toLowerCase()));
+      const admins = await this.prisma.user.findMany({
+        where: { role: UserRole.ADMIN, isActive: true },
+        select: { email: true },
+      });
+      const { attachments: _a, dedupeKey, ...original } = mail;
+      for (const { email } of admins) {
+        if (skip.has(email.toLowerCase())) continue;
+        await this.mail.send({
+          to: email,
+          template: `${mail.template}.admin-copy`,
+          dedupeKey: dedupeKey ? `${dedupeKey}:admin:${email.toLowerCase()}` : undefined,
+          loanId: mail.loanId,
+          ...adminCopyMail({ summary, customerEmail: mail.to, original }),
+        });
+      }
+    } catch (err: any) {
+      this.logger.error(`No se pudieron enviar las copias a administración ("${summary}"): ${err?.message || err}`);
+    }
+    return result;
+  }
+
   async notifyLeadCreated(leadId: string) {
     const lead = await this.prisma.lead.findUnique({ where: { id: leadId }, include: { vehicle: true } });
     if (!lead) return;
     const vehicle = vehicleLabel(lead.vehicle);
 
-    await this.mail.send({
+    const staffForLead = await this.settings.getStaffNotificationEmails();
+    await this.notifyCustomer(`Nuevo prospecto ${lead.code} de ${lead.fullName}`, {
       to: lead.email,
       template: 'lead.received',
       dedupeKey: `lead:${lead.id}:received`,
       ...leadReceivedMail({ fullName: lead.fullName, code: lead.code, vehicle, termMonths: lead.termMonths }),
-    });
+    }, staffForLead);
 
-    const staff = await this.settings.getStaffNotificationEmails();
-    for (const to of staff) {
+    for (const to of staffForLead) {
       await this.mail.send({
         to,
         template: 'lead.staff-alert',
@@ -138,7 +172,8 @@ export class NotificationsService implements OnModuleInit {
       firstDueDate: first?.dueDate ?? loan.firstDueDate.toISOString(),
     };
 
-    await this.mail.send({
+    const staffForLoan = await this.settings.getStaffNotificationEmails();
+    await this.notifyCustomer(`Se activó el crédito ${loan.code} de ${loan.customer.fullName}`, {
       to: loan.customer.email,
       template: 'loan.approved',
       dedupeKey: `loan:${loan.id}:approved`,
@@ -147,10 +182,9 @@ export class NotificationsService implements OnModuleInit {
         ? [{ filename: `Tabla-Amortizacion-${loan.code}.pdf`, content: schedulePdf, contentType: 'application/pdf' }]
         : undefined,
       ...loanApprovedMail(summary),
-    });
+    }, staffForLoan);
 
-    const staff = await this.settings.getStaffNotificationEmails();
-    for (const to of staff) {
+    for (const to of staffForLoan) {
       await this.mail.send({
         to,
         template: 'loan.approved.staff',
@@ -168,7 +202,7 @@ export class NotificationsService implements OnModuleInit {
     const { loan, snapshot } = await this.finance.getLoanLedgerSnapshot(payment.loanId);
     const next = snapshot.current.installments.find(isOpen);
 
-    await this.mail.send({
+    await this.notifyCustomer(`Se registró el pago ${payment.code} de ${loan.customer.fullName} en el crédito ${loan.code}`, {
       to: loan.customer.email,
       template: 'payment.registered',
       dedupeKey: `payment:${payment.id}`,
@@ -191,7 +225,7 @@ export class NotificationsService implements OnModuleInit {
     const { loan, snapshot } = await this.finance.getLoanLedgerSnapshot(loanId);
     const recipient = to || loan.customer.email;
     const pdf = await this.pdf.generateAccountStatementPdf(loan.id);
-    const result = await this.mail.send({
+    const result = await this.notifyCustomer(`Se envió el estado de cuenta del crédito ${loan.code} de ${loan.customer.fullName}`, {
       to: recipient,
       template: 'loan.statement',
       loanId: loan.id,
@@ -278,7 +312,9 @@ export class NotificationsService implements OnModuleInit {
           if (!isOpen(inst) || !D(amountDue(inst)).gt(0)) continue;
 
           if (inst.dueDate === reminderTarget) {
-            const result = await this.mail.send({
+            const result = await this.notifyCustomer(
+              `Recordatorio de pago: cuota ${inst.number} del crédito ${loan.code} de ${loan.customer.fullName}`,
+              {
               to: loan.customer.email,
               template: 'payment.reminder',
               dedupeKey: `reminder:${loan.id}:${inst.number}:${inst.dueDate}:${cfg.reminderDaysBefore}`,
@@ -298,7 +334,9 @@ export class NotificationsService implements OnModuleInit {
 
           // Aviso de mora: a partir del primer día posterior a la gracia del crédito
           if (inst.daysOverdue > loan.graceDays && (await this.overdueNoticeDue(loan.id, inst, today, cfg.overdueReminderEveryDays))) {
-            const result = await this.mail.send({
+            const result = await this.notifyCustomer(
+              `Aviso de mora: cuota ${inst.number} del crédito ${loan.code} de ${loan.customer.fullName} (${inst.daysOverdue} días de atraso)`,
+              {
               to: loan.customer.email,
               template: 'payment.overdue',
               dedupeKey: `overdue:${loan.id}:${inst.number}:${inst.dueDate}:${today}`,

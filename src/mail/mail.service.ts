@@ -70,7 +70,7 @@ export class MailService {
       return { status: 'SKIPPED', error: 'El envío de correos no está configurado.' };
     }
 
-    if (mail.dedupeKey) {
+    if (mail.dedupeKey && TenantContext.companyId()) {
       const previous = await this.prisma.notificationLog.findUnique({ where: { dedupeKey: mail.dedupeKey } });
       if (previous?.status === NotificationStatus.SENT) return { status: 'SKIPPED' };
     }
@@ -156,6 +156,11 @@ export class MailService {
   }
 
   private async record(mail: OutgoingMail, result: MailResult) {
+    // NotificationLog es por empresa: los correos de plataforma (superadmin) solo quedan en el log
+    if (!TenantContext.companyId()) {
+      this.logger.log(`Correo de plataforma "${mail.template}" a ${mail.to}: ${result.status}`);
+      return;
+    }
     const data = {
       recipientEmail: mail.to,
       subject: mail.subject,

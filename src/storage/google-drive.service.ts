@@ -136,6 +136,33 @@ export class GoogleDriveService {
     return this.ensurePath(companyId, [slug, ...folderPath].map(driveName));
   }
 
+  /**
+   * Envía a la papelera (recuperable 30 días) la carpeta VELTOR/<slug> de una empresa. No crea carpetas:
+   * si no existe, no hace nada.
+   */
+  async trashCompanyFolder(slug: string): Promise<{ trashed: boolean; folderId?: string; reason?: string }> {
+    if (!this.isEnabled()) return { trashed: false, reason: 'Google Drive no está activo' };
+    const rootId = await this.findFolder(this.rootName, 'root');
+    if (!rootId) return { trashed: false, reason: 'No existe la carpeta raíz' };
+    const folderId = await this.findFolder(driveName(slug), rootId);
+    if (!folderId) return { trashed: false, reason: 'La empresa no tenía carpeta en Drive' };
+    await this.request(`${FILES_URL}/${encodeURIComponent(folderId)}?fields=id`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+    });
+    this.logger.warn(`Carpeta de Drive ${this.rootName}/${slug} enviada a la papelera`);
+    return { trashed: true, folderId };
+  }
+
+  private async findFolder(name: string, parentId: string): Promise<string | null> {
+    const q = `name = ${quoteQuery(name)} and mimeType = '${FOLDER_MIME}' and '${parentId}' in parents and trashed = false`;
+    const found = await this.request<{ files: DriveFile[] }>(
+      `${FILES_URL}?${new URLSearchParams({ q, fields: 'files(id,name)', pageSize: '1' })}`,
+    );
+    return found.files[0]?.id ?? null;
+  }
+
   /** Olvida la carpeta en caché de una empresa (p. ej. al cambiar su slug). */
   forgetCompany(companyId: string) {
     this.folders.delete(companyId);

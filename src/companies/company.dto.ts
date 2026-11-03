@@ -2,6 +2,10 @@ import { ApiProperty, ApiPropertyOptional, OmitType, PartialType } from '@nestjs
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  IsInt,
+  IsNumber,
+  Max,
+  Min,
   IsArray,
   IsBoolean,
   IsEmail,
@@ -184,6 +188,72 @@ export class PlatformCompanyFieldsDto extends CompanyBrandingDto {
   isDefault?: boolean;
 }
 
+/** Producto financiero inicial de la empresa: valores capturados por el superadmin (sin valores por defecto) */
+export class CompanyProductDto {
+  @ApiProperty({ example: 'Crédito Vehicular Estándar' })
+  @trim()
+  @IsString()
+  @MinLength(3)
+  @MaxLength(120)
+  name!: string;
+
+  @ApiProperty({ example: 0.012, description: 'Tasa mensual mínima en decimal (0.012 = 1.2 %)' })
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0.0001)
+  @Max(0.5)
+  minMonthlyRate!: number;
+
+  @ApiProperty({ example: 0.022 })
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0.0001)
+  @Max(0.5)
+  maxMonthlyRate!: number;
+
+  @ApiProperty({ example: 0.015 })
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0.0001)
+  @Max(0.5)
+  defaultMonthlyRate!: number;
+
+  @ApiProperty({ example: 12 })
+  @IsInt()
+  @Min(1)
+  @Max(600)
+  minTermMonths!: number;
+
+  @ApiProperty({ example: 72 })
+  @IsInt()
+  @Min(1)
+  @Max(600)
+  maxTermMonths!: number;
+
+  @ApiProperty({ example: 15, description: 'Prima mínima en porcentaje' })
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  minDownPercent!: number;
+
+  @ApiProperty({ example: 5 })
+  @IsInt()
+  @Min(0)
+  @Max(60)
+  graceDays!: number;
+
+  @ApiPropertyOptional({ nullable: true, example: 0.03, description: 'Interés moratorio mensual heredado (opcional)' })
+  @optionalNullable()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(1)
+  lateRateMonthly?: number | null;
+}
+
+export class DeleteCompanyDto {
+  @ApiProperty({ description: 'Debe ser igual al slug de la empresa (confirmación)' })
+  @IsString()
+  @IsNotEmpty()
+  confirmSlug!: string;
+}
+
 export class CreateCompanyDto extends OmitType(PlatformCompanyFieldsDto, ['name', 'slug'] as const) {
   @ApiProperty()
   @trim()
@@ -196,6 +266,11 @@ export class CreateCompanyDto extends OmitType(PlatformCompanyFieldsDto, ['name'
   @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @Matches(SLUG_RE, { message: 'El slug debe tener 3-40 caracteres: minúsculas, números y guiones (sin guion al inicio o al final).' })
   slug!: string;
+
+  @ApiProperty({ type: CompanyProductDto, description: 'Producto financiero inicial' })
+  @ValidateNested()
+  @Type(() => CompanyProductDto)
+  product!: CompanyProductDto;
 
   @ApiProperty({ description: 'Correo del primer administrador de la empresa' })
   @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))

@@ -20,17 +20,26 @@ const brand = brandName;
 /** Content-ID del logo incrustado en el correo (MailService lo adjunta) */
 export const MAIL_LOGO_CID = 'company-logo';
 
+/** URL pública del frontend de la plataforma (FRONTEND_URL o, por compatibilidad, APP_PUBLIC_URL) */
+export const frontendBaseUrl = () => (process.env.FRONTEND_URL || process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
+
 /**
- * Enlace al sitio de la empresa: su primer dominio o, si no tiene, APP_PUBLIC_URL con ?empresa=<slug>
- * para que el frontend cargue la marca correcta. Sin ninguno de los dos no se incluyen enlaces.
+ * Enlace al sitio de la empresa: su primer dominio o, si no tiene, la URL pública del frontend con
+ * ?empresa=<slug> para que cargue la marca correcta. Sin ninguno de los dos no se incluyen enlaces.
  */
-export function siteLink(path: string): string | null {
+export function siteLink(path: string, params: Record<string, string> = {}): string | null {
   const c = TenantContext.company();
   const domain = c?.domains?.[0];
-  if (domain) return `https://${domain}${path}`;
-  const base = (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
-  if (!base) return null;
-  return c?.slug ? `${base}${path}?empresa=${encodeURIComponent(c.slug)}` : `${base}${path}`;
+  const query = new URLSearchParams(params);
+  let base: string;
+  if (domain) base = `https://${domain}`;
+  else {
+    base = frontendBaseUrl();
+    if (!base) return null;
+    if (c?.slug) query.set('empresa', c.slug);
+  }
+  const qs = query.toString();
+  return `${base}${path}${qs ? `?${qs}` : ''}`;
 }
 
 export interface RenderedMail {
@@ -369,6 +378,47 @@ export function staffAccessMail(p: {
     subject: `${brand()}: tu acceso de administrador`,
     html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${link.html}`),
     text: textOf(title, [intro, link.text].filter(Boolean), rows),
+  };
+}
+
+/** Enlace para restablecer la contraseña (vence en 1 hora) */
+export function passwordResetMail(p: { fullName: string; url: string | null; minutes: number }): RenderedMail {
+  const title = 'Restablece tu contraseña';
+  const intro = `Hola ${firstName(p.fullName)}, recibimos una solicitud para restablecer la contraseña de tu cuenta en ${brand()}.`;
+  const note = `El enlace vence en ${p.minutes} minutos y solo se puede usar una vez. Si no lo solicitaste, ignora este correo: tu contraseña no cambiará.`;
+  const link = p.url ? { html: button('Restablecer contraseña', p.url), text: `Restablecer: ${p.url}` } : { html: '', text: '' };
+  return {
+    subject: `${brand()}: restablece tu contraseña`,
+    html: layout(title, `<p>${esc(intro)}</p>${link.html}<p style="color:#64748B;font-size:13px">${esc(note)}</p>`),
+    text: textOf(title, [intro, link.text, note].filter(Boolean)),
+  };
+}
+
+/** Contraseña temporal del superadministrador de la plataforma (creado al arrancar) */
+export function platformAccessMail(p: { email: string; temporaryPassword: string }): RenderedMail {
+  const title = 'Acceso de superadministrador';
+  const rows: Row[] = [
+    ['Usuario', p.email],
+    ['Contraseña temporal', p.temporaryPassword],
+  ];
+  const intro = 'Se creó el usuario superadministrador de la plataforma. Al ingresar se te pedirá cambiar la contraseña temporal.';
+  const url = siteLink('/login');
+  const link = url ? { html: button('Ingresar', url), text: `Ingreso: ${url}` } : { html: '', text: '' };
+  return {
+    subject: 'Plataforma: acceso de superadministrador',
+    html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${link.html}`),
+    text: textOf(title, [intro, link.text].filter(Boolean), rows),
+  };
+}
+
+/** Copia para los ADMIN de la empresa de un correo enviado al cliente */
+export function adminCopyMail(p: { summary: string; customerEmail: string; original: RenderedMail }): RenderedMail {
+  const title = p.summary;
+  const intro = `Copia para administración: se envió al cliente (${p.customerEmail}) el correo "${p.original.subject}".`;
+  return {
+    subject: `${brand()} [copia]: ${p.summary}`,
+    html: layout(title, `<p>${esc(intro)}</p><pre style="white-space:pre-wrap;font-family:inherit;font-size:13px;color:#334155;background:#F8FAFC;padding:12px;border-radius:8px">${esc(p.original.text)}</pre>`),
+    text: textOf(title, [intro, '', p.original.text]),
   };
 }
 

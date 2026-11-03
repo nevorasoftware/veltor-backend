@@ -3,18 +3,20 @@ import { UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
-import { CompaniesService } from '../companies/companies.service';
+import { MailService } from '../mail/mail.service';
+import { platformAccessMail } from '../mail/templates';
+import { TenantContext } from '../tenant/tenant-context';
 
 /** Único superadministrador de la plataforma (contrato multiempresa) */
 export const PLATFORM_SUPERADMIN_EMAIL = 'softwarenevora@gmail.com';
 
 /**
- * Inicialización mínima al arrancar (idempotente):
- *  - Garantiza la empresa por defecto (y su producto financiero si la empresa no tiene ninguno).
- *  - Garantiza el superadministrador de plataforma softwarenevora@gmail.com (companyId = null).
- *    Cualquier otro SUPERADMIN pasa a ADMIN de la empresa por defecto.
- * Los productos financieros de las demás empresas se crean al crear la empresa, no al arrancar.
- * No crea datos de demostración. Todas las consultas son de plataforma: usan `prisma.unscoped`.
+ * Inicialización al arrancar (idempotente). NO crea empresas, productos ni datos de ejemplo (fase 2, punto 6):
+ *  - Garantiza el superadministrador de plataforma softwarenevora@gmail.com (companyId = null). Si hay que
+ *    crearlo, usa BOOTSTRAP_SUPERADMIN_PASSWORD o genera una contraseña temporal que se envía POR CORREO a esa
+ *    cuenta (y queda en el log como respaldo si el correo falla).
+ *  - Cualquier otro SUPERADMIN pasa a ADMIN (de la empresa por defecto, si el usuario no tiene empresa).
+ * Todas las consultas son de plataforma: usan `prisma.unscoped`.
  */
 @Injectable()
 export class BootstrapService implements OnApplicationBootstrap {
@@ -22,39 +24,48 @@ export class BootstrapService implements OnApplicationBootstrap {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly companies: CompaniesService,
+    private readonly mail: MailService,
   ) {}
 
   async onApplicationBootstrap() {
     try {
-      const company = await this.companies.ensureDefaultCompany();
-      await this.companies.ensureProductFor(company.id);
-      await this.ensureSuperadmin(company.id);
+      await this.ensureSingleSuperadmin();
+      await this.ensureSuperadmin();
     } catch (err: any) {
       this.logger.error(`No se pudo completar la inicialización: ${err?.message || err}`);
     }
     this.warnEphemeralStorage();
   }
 
-  private async ensureSuperadmin(defaultCompanyId: string) {
+  /** Solo softwarenevora@gmail.com es SUPERADMIN; los demás pasan a ADMIN de su empresa. */
+  private async ensureSingleSuperadmin() {
     const db = this.prisma.unscoped;
-
-    const demoted = await db.user.updateMany({
+    const others = await db.user.findMany({
       where: { role: UserRole.SUPERADMIN, email: { not: PLATFORM_SUPERADMIN_EMAIL } },
-      data: { role: UserRole.ADMIN },
+      select: { id: true, companyId: true },
     });
-    if (demoted.count) this.logger.warn(`${demoted.count} superadministrador(es) adicional(es) pasaron a ADMIN.`);
-    await db.user.updateMany({
-      where: { companyId: null, email: { not: PLATFORM_SUPERADMIN_EMAIL } },
-      data: { companyId: defaultCompanyId },
-    });
+    if (!others.length) return;
+    const fallback = await db.company.findFirst({ where: { isDefault: true }, select: { id: true } });
+    for (const u of others) {
+      const companyId = u.companyId ?? fallback?.id;
+      if (!companyId) {
+        await db.user.update({ where: { id: u.id }, data: { role: UserRole.ADMIN, isActive: false } });
+        this.logger.warn(`Usuario ${u.id}: SUPERADMIN sin empresa; se desactivó como ADMIN (no hay empresa por defecto).`);
+      } else {
+        await db.user.update({ where: { id: u.id }, data: { role: UserRole.ADMIN, companyId } });
+      }
+    }
+    this.logger.warn(`${others.length} superadministrador(es) adicional(es) pasaron a ADMIN.`);
+  }
 
+  private async ensureSuperadmin() {
+    const db = this.prisma.unscoped;
     const existing = await db.user.findUnique({ where: { email: PLATFORM_SUPERADMIN_EMAIL } });
     if (existing) {
       if (existing.role !== UserRole.SUPERADMIN || existing.companyId !== null || !existing.isActive) {
         await db.user.update({
           where: { id: existing.id },
-          data: { role: UserRole.SUPERADMIN, companyId: null, isActive: true },
+          data: { role: UserRole.SUPERADMIN, companyId: null, customerId: null, isActive: true },
         });
         this.logger.warn(`${PLATFORM_SUPERADMIN_EMAIL} quedó como superadministrador de plataforma.`);
       }
@@ -76,10 +87,21 @@ export class BootstrapService implements OnApplicationBootstrap {
         mustChangePass: true,
       },
     });
-
     this.logger.warn(`Superadministrador de plataforma creado: ${PLATFORM_SUPERADMIN_EMAIL}`);
-    if (generated) {
-      this.logger.warn(`Contraseña temporal generada (cámbiala al ingresar): ${password}`);
+    if (!generated) return;
+
+    // La contraseña temporal se entrega por correo; el log es solo el respaldo si el correo falla
+    const result = await TenantContext.run(null, () =>
+      this.mail.send({
+        to: PLATFORM_SUPERADMIN_EMAIL,
+        template: 'platform.superadmin-access',
+        ...platformAccessMail({ email: PLATFORM_SUPERADMIN_EMAIL, temporaryPassword: password }),
+      }),
+    );
+    if (result.status === 'SENT') {
+      this.logger.warn(`Contraseña temporal enviada por correo a ${PLATFORM_SUPERADMIN_EMAIL}.`);
+    } else {
+      this.logger.warn(`No se pudo enviar el correo (${result.error}). Contraseña temporal (cámbiala al ingresar): ${password}`);
     }
   }
 

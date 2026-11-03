@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiProduces, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Request, Response } from 'express';
@@ -11,6 +11,7 @@ import {
   CompanyAdminDto,
   CompanyStatusDto,
   CreateCompanyDto,
+  DeleteCompanyDto,
   LogoDto,
   UpdateOwnCompanyDto,
   UpdatePlatformCompanyDto,
@@ -58,6 +59,12 @@ export class PlatformCompaniesController {
   @ApiOperation({ summary: 'Activar o desactivar una empresa' })
   setStatus(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CompanyStatusDto) {
     return this.companies.setStatus(id, dto.isActive);
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: 'Borrar una empresa con todos sus datos y su carpeta de Drive (requiere confirmSlug)' })
+  remove(@Param('id', ParseUUIDPipe) id: string, @Body() dto: DeleteCompanyDto) {
+    return this.companies.remove(id, dto.confirmSlug);
   }
 
   @Post(':id/admins')
