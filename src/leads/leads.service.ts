@@ -741,7 +741,13 @@ export class LeadsService {
             },
           });
 
-          const note = `Formalizado a Crédito Activo [${loanCode}] el ${disbursementDate}. Expediente documental completo adjunto.`;
+          // La nota describe lo que realmente pasó: en carga inicial el expediente puede estar incompleto o vacío
+          const docsNote = !initialLoad
+            ? 'Expediente documental completo adjunto.'
+            : documents.length
+              ? `Carga inicial: ${documents.length} documento(s) adjunto(s); expediente pendiente de completar.`
+              : 'Carga inicial: expediente pendiente.';
+          const note = `Formalizado a Crédito Activo [${loanCode}] el ${disbursementDate}. ${docsNote}`;
           await tx.lead.update({
             where: { id: leadId },
             data: {
