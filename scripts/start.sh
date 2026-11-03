@@ -3,10 +3,10 @@
 # No siembra datos: solo `prisma migrate deploy` (nunca `db seed`, `db push` ni `migrate reset`).
 set -e
 
-# Migración que corre completa en una sola transacción: si falló, Postgres la
-# revirtió entera y es seguro marcarla como revertida y reintentarla una vez
+# Migraciones transaccionales e idempotentes: si una falló, Postgres la revirtió
+# entera y es seguro marcarla como revertida y reintentarla una vez
 # (p. ej. tras un lock_timeout por una transacción larga de la versión anterior).
-TRANSACTIONAL_RETRY="20261103000000_multitenant"
+RETRYABLE="20261103000000_multitenant 20261104000000_loan_insurance_initial_load"
 
 deploy() {
   status=0
@@ -23,9 +23,9 @@ if ! deploy; then
     echo "[start] Registrando la migración inicial como línea base y reintentando..."
     npx prisma migrate resolve --applied 20261025000000_init
     deploy
-  elif grep -q "P3009" /tmp/migrate.log && grep -q "$TRANSACTIONAL_RETRY" /tmp/migrate.log; then
-    echo "[start] $TRANSACTIONAL_RETRY falló antes (transacción revertida). Se marca como revertida y se reintenta una vez..."
-    npx prisma migrate resolve --rolled-back "$TRANSACTIONAL_RETRY"
+  elif grep -q "P3009" /tmp/migrate.log && failed=$(for m in $RETRYABLE; do grep -q "$m" /tmp/migrate.log && echo "$m" && break; done) && [ -n "$failed" ]; then
+    echo "[start] $failed falló antes (transacción revertida). Se marca como revertida y se reintenta una vez..."
+    npx prisma migrate resolve --rolled-back "$failed"
     deploy
   else
     echo "[start] ERROR: las migraciones fallaron; la API no se inicia." >&2

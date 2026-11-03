@@ -175,6 +175,8 @@ enum AllocationConcept {
   ACCRUED_INTEREST
   PREPAYMENT_PRINCIPAL
   SURPLUS
+  /// Seguro mensual de la cuota
+  INSURANCE
 }
 
 /// Recargo por atraso: NONE (sin recargo), PER_DAY (monto fijo por día de atraso tras la gracia), PER_INSTALLMENT (monto fijo por cuota vencida)
@@ -627,20 +629,24 @@ model Loan {
   originalPrincipal       Decimal @db.Decimal(12, 2)
   currentPrincipalBalance Decimal @db.Decimal(12, 2)
 
-  monthlyRate     Decimal            @db.Decimal(6, 4)
-  termCount       Int
-  frequency       PaymentFrequency   @default(MONTHLY)
-  dayCount        DayCountBasis      @default(D30_360)
-  method          AmortizationMethod @default(FRENCH)
-  graceDays       Int                @default(5)
-  lateRateMonthly Decimal?           @db.Decimal(6, 4)
+  monthlyRate         Decimal            @db.Decimal(6, 4)
+  termCount           Int
+  frequency           PaymentFrequency   @default(MONTHLY)
+  dayCount            DayCountBasis      @default(D30_360)
+  method              AmortizationMethod @default(FRENCH)
+  graceDays           Int                @default(5)
+  lateRateMonthly     Decimal?           @db.Decimal(6, 4)
   /// Recargo por mora parametrizado al aperturar el crédito
-  lateFeeType     LateFeeType        @default(NONE)
-  lateFeeAmount   Decimal?           @db.Decimal(12, 2)
+  lateFeeType         LateFeeType        @default(NONE)
+  lateFeeAmount       Decimal?           @db.Decimal(12, 2)
   /// Día del mes en que vence cada cuota (1-28)
-  paymentDay      Int?
+  paymentDay          Int?
   /// Carpeta del crédito en Google Drive (VELTOR/Creditos/<código>)
-  driveFolderId   String?
+  driveFolderId       String?
+  /// Seguro mensual fijo por cuota (null = sin seguro)
+  insuranceMonthly    Decimal?           @db.Decimal(12, 2)
+  /// En true no se envían recordatorios ni avisos de mora (créditos de carga inicial mientras se registran pagos históricos)
+  notificationsPaused Boolean            @default(false)
 
   disbursementDate DateTime   @db.Date
   firstDueDate     DateTime   @db.Date
@@ -698,6 +704,8 @@ model AmortizationInstallment {
   scheduledPrincipal Decimal  @db.Decimal(12, 2)
   scheduledInterest  Decimal  @db.Decimal(12, 2)
   scheduledPayment   Decimal  @db.Decimal(12, 2)
+  /// Seguro programado de la cuota (0 = sin seguro)
+  scheduledInsurance Decimal  @default(0) @db.Decimal(12, 2)
   closingBalance     Decimal  @db.Decimal(12, 2)
 
   paidPrincipal    Decimal           @default(0) @db.Decimal(12, 2)
