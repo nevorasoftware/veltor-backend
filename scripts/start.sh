@@ -6,7 +6,7 @@ set -e
 # Migraciones transaccionales e idempotentes: si una falló, Postgres la revirtió
 # entera y es seguro marcarla como revertida y reintentarla una vez
 # (p. ej. tras un lock_timeout por una transacción larga de la versión anterior).
-RETRYABLE="20261103000000_multitenant 20261104000000_loan_insurance_initial_load"
+RETRYABLE="20261103000000_multitenant 20261104000000_loan_insurance_initial_load 20261105000000_partial_initial_load"
 
 deploy() {
   status=0

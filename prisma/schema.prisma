@@ -321,14 +321,14 @@ model Customer {
   nit              String?
   birthDate        DateTime?
   maritalStatus    MaritalStatus?
-  phone            String
+  phone            String?
   email            String? // Opcional: clientes cargados sin correo. Único por empresa solo cuando no es null
-  address          String
+  address          String?
   municipality     String?
   department       String?        @default("San Salvador")
-  economicActivity String
+  economicActivity String?
   employerName     String?
-  monthlyIncome    Decimal        @db.Decimal(12, 2)
+  monthlyIncome    Decimal?       @db.Decimal(12, 2)
   declaredDebts    Decimal        @default(0) @db.Decimal(12, 2)
   status           CustomerStatus @default(PROSPECT)
   internalNotes    String?        @db.Text
@@ -388,16 +388,16 @@ model Vehicle {
   companyId      String              @default(dbgenerated("current_setting('app.company_id'::text, true)"))
   company        Company             @relation(fields: [companyId], references: [id])
   code           String // VEH-0001
-  brand          String
-  model          String
-  year           Int
+  brand          String?
+  model          String?
+  year           Int?
   version        String?
-  type           String // Sedan, SUV, Pickup, Hatchback
+  type           String? // Sedan, SUV, Pickup, Hatchback
   transmission   VehicleTransmission @default(AUTOMATIC)
   fuel           VehicleFuel         @default(GASOLINE)
   engineCc       Int?
-  mileageKm      Int
-  color          String
+  mileageKm      Int?
+  color          String?
   passengers     Int                 @default(5)
   description    String              @db.Text
   features       String[]            @default([]) // Acabados, A/C, sensores, pantalla
@@ -472,7 +472,7 @@ model Lead {
   company          Company    @relation(fields: [companyId], references: [id])
   code             String // PROS-0001
   fullName         String
-  phone            String
+  phone            String?
   email            String? // Opcional: prospectos de clientes cargados sin correo
   message          String?    @db.Text
   source           LeadSource @default(CATALOG_REQUEST)
