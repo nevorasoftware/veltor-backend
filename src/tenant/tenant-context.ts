@@ -8,12 +8,21 @@ export interface TenantCompanyInfo {
   legalName: string | null;
   tagline: string | null;
   primaryColor: string;
+  secondaryColor: string;
   accentColor: string;
   locale: string;
   currency: string;
   timezone: string;
+  domains: string[];
   contactEmail: string | null;
   contactPhone: string | null;
+  contactHours: string | null;
+  paymentsEmail: string | null;
+  paymentsWhatsapp: string | null;
+  bankAccounts: { bank: string; detail: string }[];
+  bankAccountHolder: string | null;
+  /** Tipo del logo (los bytes se cargan solo cuando se necesitan) */
+  logoMime: string | null;
 }
 
 export interface TenantStore {

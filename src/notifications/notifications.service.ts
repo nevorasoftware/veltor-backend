@@ -237,7 +237,7 @@ export class NotificationsService implements OnModuleInit {
   @Cron('0 * * * *', { name: 'payment-reminders' })
   async runDailyCollections(now = new Date()) {
     if (!this.mail.isConfigured()) return [];
-    const companies = await this.prisma.unscoped.company.findMany({ where: { isActive: true }, orderBy: { createdAt: 'asc' } });
+    const companies = await this.prisma.unscoped.company.findMany({ where: { isActive: true }, orderBy: { createdAt: 'asc' }, omit: { logoData: true } });
     const results: { company: string; checked: number; reminders: number; overdueNotices: number; sent: number }[] = [];
     for (const company of companies) {
       if (localHour(company.timezone, now) !== COLLECTION_HOUR) continue;

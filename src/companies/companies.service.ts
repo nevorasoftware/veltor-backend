@@ -339,8 +339,6 @@ export class CompaniesService {
       select: { id: true, email: true, fullName: true, role: true, companyId: true },
     });
 
-    const baseUrl = (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
-    const loginUrl = baseUrl ? `${baseUrl}/login?empresa=${encodeURIComponent(company.slug)}` : null;
     // El aviso queda registrado en notification_logs de la empresa y firmado con su marca
     const result = await TenantContext.run(
       company.id,
@@ -348,7 +346,7 @@ export class CompaniesService {
         this.mail.send({
           to: email,
           template: 'staff.access',
-          ...staffAccessMail({ fullName: user.fullName, email, temporaryPassword, loginUrl }),
+          ...staffAccessMail({ fullName: user.fullName, email, temporaryPassword }),
         }),
       toCompanyInfo(company),
     );

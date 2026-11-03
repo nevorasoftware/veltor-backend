@@ -1,14 +1,37 @@
 /**
- * Plantillas HTML de los correos de VELTOR. Diseño de tabla simple y estilos en línea
- * para que se vea bien en Gmail, Outlook y clientes móviles.
+ * Plantillas HTML de los correos. Diseño de tabla simple y estilos en línea para que se vea bien en
+ * Gmail, Outlook y clientes móviles. Nombre, logo, colores, contactos, canales de pago, moneda y enlaces
+ * salen de la empresa del contexto (TenantContext); la única leyenda fija es "Desarrollado por Nevora Software".
  */
 
 import { TenantContext } from '../tenant/tenant-context';
+import {
+  PLATFORM_CREDIT,
+  brandHasRasterLogo,
+  brandName,
+  brandPrimary,
+  contactParts,
+  formatMoney,
+  paymentChannels,
+} from '../tenant/company-branding';
 
-/** Cada empresa firma sus propios correos; fuera de contexto se usa la marca de la plataforma */
-const brand = () => TenantContext.company()?.name || process.env.PRODUCT_NAME || 'VELTOR';
-const company = () => process.env.PRODUCT_COMPANY || 'Nevora Software';
-const publicUrl = () => (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
+const brand = brandName;
+
+/** Content-ID del logo incrustado en el correo (MailService lo adjunta) */
+export const MAIL_LOGO_CID = 'company-logo';
+
+/**
+ * Enlace al sitio de la empresa: su primer dominio o, si no tiene, APP_PUBLIC_URL con ?empresa=<slug>
+ * para que el frontend cargue la marca correcta. Sin ninguno de los dos no se incluyen enlaces.
+ */
+export function siteLink(path: string): string | null {
+  const c = TenantContext.company();
+  const domain = c?.domains?.[0];
+  if (domain) return `https://${domain}${path}`;
+  const base = (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
+  if (!base) return null;
+  return c?.slug ? `${base}${path}?empresa=${encodeURIComponent(c.slug)}` : `${base}${path}`;
+}
 
 export interface RenderedMail {
   subject: string;
@@ -23,11 +46,8 @@ export const esc = (v: unknown) =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-export const usd = (v: unknown) =>
-  new Intl.NumberFormat(TenantContext.company()?.locale || process.env.APP_LOCALE || 'es-SV', {
-    style: 'currency',
-    currency: TenantContext.company()?.currency || process.env.APP_CURRENCY || 'USD',
-  }).format(Number(v) || 0);
+/** Monto en la moneda y el formato de la empresa */
+export const usd = (v: unknown) => formatMoney(v);
 
 /** AAAA-MM-DD → DD/MM/AAAA sin pasar por zonas horarias */
 export const dateSV = (d: string) => {
@@ -53,7 +73,29 @@ ${rows
 }
 
 function button(label: string, href: string) {
-  return `<p style="margin:24px 0 8px"><a href="${esc(href)}" style="display:inline-block;background:#0F172A;color:#FFFFFF;text-decoration:none;font-weight:bold;font-size:14px;padding:12px 22px;border-radius:8px">${esc(label)}</a></p>`;
+  return `<p style="margin:24px 0 8px"><a href="${esc(href)}" style="display:inline-block;background:${esc(brandPrimary())};color:#FFFFFF;text-decoration:none;font-weight:bold;font-size:14px;padding:12px 22px;border-radius:8px">${esc(label)}</a></p>`;
+}
+
+/** Logo (PNG/JPEG incrustado) o, si no hay, el nombre de la empresa */
+function headerBrand() {
+  return brandHasRasterLogo()
+    ? `<img src="cid:${MAIL_LOGO_CID}" alt="${esc(brand())}" style="display:block;max-height:44px;max-width:220px;border:0">`
+    : esc(brand());
+}
+
+function contactLine() {
+  const parts = contactParts();
+  return parts.length ? `Si tienes dudas, responde a este correo o contáctanos: ${parts.join(' · ')}.` : 'Si tienes dudas, responde a este correo.';
+}
+
+/** Cuentas y canales donde el cliente puede pagar (si la empresa los configuró) */
+function paymentsBlock(): { html: string; text: string[] } {
+  const rows = paymentChannels();
+  if (!rows.length) return { html: '', text: [] };
+  return {
+    html: `<p style="margin:16px 0 0;font-weight:bold">Dónde pagar</p>${rowsTable(rows.map((r) => [r.label, r.value] as Row))}`,
+    text: ['Dónde pagar:', ...rows.map((r) => `${r.label}: ${r.value}`)],
+  };
 }
 
 function layout(title: string, bodyHtml: string) {
@@ -63,14 +105,14 @@ function layout(title: string, bodyHtml: string) {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1F5F9;padding:24px 12px">
 <tr><td align="center">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:12px;overflow:hidden">
-    <tr><td style="background:#0B132B;padding:18px 24px;color:#FFFFFF;font-size:18px;font-weight:bold;letter-spacing:2px">${esc(brand())}</td></tr>
+    <tr><td style="background:${esc(brandPrimary())};padding:18px 24px;color:#FFFFFF;font-size:18px;font-weight:bold;letter-spacing:2px">${headerBrand()}</td></tr>
     <tr><td style="padding:24px;font-size:15px;line-height:1.55">
       <h1 style="margin:0 0 12px;font-size:20px;color:#0F172A">${esc(title)}</h1>
       ${bodyHtml}
     </td></tr>
     <tr><td style="padding:16px 24px;background:#F8FAFC;color:#94A3B8;font-size:11px;line-height:1.5">
-      Este es un mensaje automático de ${esc(brand())}. Si tienes dudas, responde a este correo o comunícate con tu asesor.<br>
-      ${esc(brand())} — Una solución tecnológica de ${esc(company())}
+      Este es un mensaje automático de ${esc(brand())}. ${esc(contactLine())}<br>
+      ${esc(PLATFORM_CREDIT)}
     </td></tr>
   </table>
 </td></tr>
@@ -79,13 +121,14 @@ function layout(title: string, bodyHtml: string) {
 }
 
 function textOf(title: string, lines: string[], rows: Row[] = []) {
-  return [title, '', ...lines, '', ...rows.map(([l, v]) => `${l}: ${v}`), '', `— ${brand()}`].join('\n');
+  const contacts = contactParts();
+  return [title, '', ...lines, '', ...rows.map(([l, v]) => `${l}: ${v}`), '', `— ${brand()}`, ...(contacts.length ? [contacts.join(' · ')] : []), PLATFORM_CREDIT].join('\n');
 }
 
 function portalLink(): { html: string; text: string } {
-  const url = publicUrl();
+  const url = siteLink('/portal');
   if (!url) return { html: '', text: '' };
-  return { html: button('Ir a mi portal', `${url}/portal`), text: `Portal del cliente: ${url}/portal` };
+  return { html: button('Ir a mi portal', url), text: `Portal del cliente: ${url}` };
 }
 
 /* ------------------------------------------------------------------ */
@@ -119,12 +162,12 @@ export function leadStaffAlertMail(p: {
     ['Teléfono', p.phone],
   ];
   if (p.vehicle) rows.push(['Vehículo', p.vehicle]);
-  const url = publicUrl();
+  const url = siteLink('/admin');
   return {
     subject: `${brand()}: nuevo prospecto ${p.code} — ${p.fullName}`,
     html: layout(
       title,
-      `${rowsTable(rows)}${p.message ? `<p style="color:#475569"><b>Mensaje:</b> ${esc(p.message)}</p>` : ''}${url ? button('Abrir panel', `${url}/admin`) : ''}`,
+      `${rowsTable(rows)}${p.message ? `<p style="color:#475569"><b>Mensaje:</b> ${esc(p.message)}</p>` : ''}${url ? button('Abrir panel', url) : ''}`,
     ),
     text: textOf(title, p.message ? [`Mensaje: ${p.message}`] : [], rows),
   };
@@ -182,10 +225,10 @@ export function loanApprovedStaffMail(p: {
     ['Tasa mensual', `${(Number(p.monthlyRate) * 100).toFixed(2)}%`],
     ['Primera cuota', dateSV(p.firstDueDate)],
   ];
-  const url = publicUrl();
+  const url = siteLink('/admin');
   return {
     subject: `${brand()}: crédito ${p.loanCode} aprobado — ${p.fullName}`,
-    html: layout(title, `${rowsTable(rows)}${url ? button('Abrir panel', `${url}/admin`) : ''}`),
+    html: layout(title, `${rowsTable(rows)}${url ? button('Abrir panel', url) : ''}`),
     text: textOf(title, [], rows),
   };
 }
@@ -210,10 +253,11 @@ export function paymentReminderMail(p: {
   const intro = `Hola ${firstName(p.fullName)}, te recordamos que tu cuota vence ${when}.`;
   const note = 'Si ya realizaste el pago, haz caso omiso de este mensaje. Pagar a tiempo evita recargos por mora.';
   const portal = portalLink();
+  const pay = paymentsBlock();
   return {
     subject: `${brand()}: tu cuota ${p.installmentNumber} vence ${when} (${dateSV(p.dueDate)})`,
-    html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}<p>${esc(note)}</p>${portal.html}`),
-    text: textOf(title, [intro, note, portal.text].filter(Boolean), rows),
+    html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${pay.html}<p>${esc(note)}</p>${portal.html}`),
+    text: textOf(title, [intro, ...pay.text, note, portal.text].filter(Boolean), rows),
   };
 }
 
@@ -246,13 +290,14 @@ export function paymentOverdueMail(p: {
     : '';
   const note = 'Si ya realizaste el pago, haz caso omiso de este mensaje o envíanos tu comprobante.';
   const portal = portalLink();
+  const pay = paymentsBlock();
   return {
     subject: `${brand()}: cuota ${p.installmentNumber} vencida — total a pagar ${usd(p.totalDue)}`,
     html: layout(
       title,
-      `<p>${esc(intro)}</p>${rowsTable(rows)}${rule ? `<p>${esc(rule)}</p>` : ''}<p>${esc(note)}</p>${portal.html}`,
+      `<p>${esc(intro)}</p>${rowsTable(rows)}${rule ? `<p>${esc(rule)}</p>` : ''}${pay.html}<p>${esc(note)}</p>${portal.html}`,
     ),
-    text: textOf(title, [intro, rule, note, portal.text].filter(Boolean), rows),
+    text: textOf(title, [intro, rule, ...pay.text, note, portal.text].filter(Boolean), rows),
   };
 }
 
@@ -318,7 +363,8 @@ export function staffAccessMail(p: {
     ['Contraseña temporal', p.temporaryPassword],
   ];
   const intro = `Hola ${firstName(p.fullName)}, se creó tu usuario de administrador de ${brand()}. Al ingresar por primera vez se te pedirá cambiar la contraseña temporal.`;
-  const link = p.loginUrl ? { html: button('Ingresar al panel', p.loginUrl), text: `Ingreso: ${p.loginUrl}` } : { html: '', text: '' };
+  const loginUrl = p.loginUrl ?? siteLink('/login');
+  const link = loginUrl ? { html: button('Ingresar al panel', loginUrl), text: `Ingreso: ${loginUrl}` } : { html: '', text: '' };
   return {
     subject: `${brand()}: tu acceso de administrador`,
     html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${link.html}`),
@@ -328,6 +374,6 @@ export function staffAccessMail(p: {
 
 export function testMail(): RenderedMail {
   const title = 'Correo de prueba';
-  const line = `La configuración de envío de correos de ${brand()} con Gmail funciona correctamente.`;
+  const line = `El envío de correos de ${brand()} funciona correctamente.`;
   return { subject: `${brand()}: correo de prueba`, html: layout(title, `<p>${esc(line)}</p>`), text: textOf(title, [line]) };
 }

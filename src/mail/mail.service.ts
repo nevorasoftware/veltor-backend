@@ -3,11 +3,15 @@ import { NotificationStatus } from '@prisma/client';
 import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../tenant/tenant-context';
+import { brandHasRasterLogo, brandName, loadRasterLogo } from '../tenant/company-branding';
+import { MAIL_LOGO_CID } from './templates';
 
 export interface MailAttachment {
   filename: string;
   content: Buffer;
   contentType?: string;
+  /** Content-ID para imágenes incrustadas en el HTML */
+  cid?: string;
 }
 
 export interface OutgoingMail {
@@ -89,17 +93,29 @@ export class MailService {
   }
 
   private async compose(mail: OutgoingMail): Promise<Buffer> {
-    // Cada empresa envía con su nombre y recibe las respuestas en su correo de contacto
+    // Cada empresa envía con su nombre y logo, y recibe las respuestas en su correo de contacto
     const tenant = TenantContext.company();
-    const fromName = tenant?.name || process.env.MAIL_FROM_NAME || process.env.PRODUCT_NAME || 'VELTOR';
+    const fromName = brandName();
+    const attachments = [...(mail.attachments ?? [])];
+    if (brandHasRasterLogo()) {
+      const logo = await loadRasterLogo(this.prisma.unscoped).catch(() => null);
+      if (logo) {
+        attachments.push({
+          filename: logo.mime === 'image/png' ? 'logo.png' : 'logo.jpg',
+          content: logo.data,
+          contentType: logo.mime,
+          cid: MAIL_LOGO_CID,
+        });
+      }
+    }
     const info = await this.composer.sendMail({
       from: { name: fromName, address: process.env.GMAIL_SENDER! },
       to: mail.to,
-      replyTo: tenant?.contactEmail || process.env.MAIL_REPLY_TO || undefined,
+      replyTo: tenant?.contactEmail || undefined,
       subject: mail.subject,
       html: mail.html,
       text: mail.text,
-      attachments: mail.attachments,
+      attachments,
     });
     return info.message as Buffer;
   }

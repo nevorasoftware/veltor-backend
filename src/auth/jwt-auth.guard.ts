@@ -68,6 +68,14 @@ export class JwtAuthGuard implements CanActivate {
         request.user = user;
         return true;
       }
+      // Superadmin en modo soporte: la empresa del X-Company-Id, aunque esté inactiva
+      const supportCompanyId = user?.role === UserRole.SUPERADMIN ? header(request, COMPANY_HEADER) : undefined;
+      if (user && supportCompanyId) {
+        await this.useCompany(request, supportCompanyId, true);
+        user.supportCompanyId = supportCompanyId;
+        request.user = user;
+        return true;
+      }
       const company = await this.tenants.resolvePublic({
         slug: header(request, TENANT_HEADER),
         host: request.hostname,

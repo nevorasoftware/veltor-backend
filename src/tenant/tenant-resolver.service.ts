@@ -24,19 +24,38 @@ export function hostnameOf(value?: string | null): string | null {
   }
 }
 
-export const toCompanyInfo = (c: Company): TenantCompanyInfo => ({
+/** Empresa sin los bytes del logo (se consulta en cada petición) */
+export type CompanyRecord = Omit<Company, 'logoData'>;
+export const WITHOUT_LOGO = { logoData: true } as const;
+
+const asBankAccounts = (v: unknown): { bank: string; detail: string }[] =>
+  Array.isArray(v)
+    ? v
+        .filter((x) => x && typeof x === 'object')
+        .map((x: any) => ({ bank: String(x.bank ?? ''), detail: String(x.detail ?? '') }))
+    : [];
+
+export const toCompanyInfo = (c: CompanyRecord): TenantCompanyInfo => ({
   id: c.id,
   slug: c.slug,
   name: c.name,
   legalName: c.legalName,
   tagline: c.tagline,
   primaryColor: c.primaryColor,
+  secondaryColor: c.secondaryColor,
   accentColor: c.accentColor,
   locale: c.locale,
   currency: c.currency,
   timezone: c.timezone,
+  domains: c.domains,
   contactEmail: c.contactEmail,
   contactPhone: c.contactPhone,
+  contactHours: c.contactHours,
+  paymentsEmail: c.paymentsEmail,
+  paymentsWhatsapp: c.paymentsWhatsapp,
+  bankAccounts: asBankAccounts(c.bankAccounts),
+  bankAccountHolder: c.bankAccountHolder,
+  logoMime: c.logoMime,
 });
 
 const NOT_FOUND = 'Empresa no encontrada o inactiva';
@@ -53,12 +72,12 @@ export class TenantResolverService {
    * Petición pública: header X-Tenant (slug) → Host/Origin contra `domains` → empresa por defecto.
    * Si la empresa no existe o está inactiva responde 404.
    */
-  async resolvePublic(hints: PublicTenantHints): Promise<Company> {
+  async resolvePublic(hints: PublicTenantHints): Promise<CompanyRecord> {
     const db = this.prisma.unscoped;
 
     const slug = hints.slug?.trim().toLowerCase();
     if (slug) {
-      const bySlug = await db.company.findUnique({ where: { slug } });
+      const bySlug = await db.company.findUnique({ where: { slug }, omit: WITHOUT_LOGO });
       if (!bySlug?.isActive) throw new NotFoundException(NOT_FOUND);
       return bySlug;
     }
@@ -66,19 +85,19 @@ export class TenantResolverService {
     // El Origin identifica el sitio del frontend; el Host, la API cuando se publica en el dominio de la empresa
     for (const host of [hostnameOf(hints.origin), hostnameOf(hints.host)]) {
       if (!host) continue;
-      const byDomain = await db.company.findFirst({ where: { domains: { has: host } }, orderBy: { createdAt: 'asc' } });
+      const byDomain = await db.company.findFirst({ where: { domains: { has: host } }, orderBy: { createdAt: 'asc' }, omit: WITHOUT_LOGO });
       if (byDomain) {
         if (!byDomain.isActive) throw new NotFoundException(NOT_FOUND);
         return byDomain;
       }
     }
 
-    const byDefault = await db.company.findFirst({ where: { isDefault: true }, orderBy: { createdAt: 'asc' } });
+    const byDefault = await db.company.findFirst({ where: { isDefault: true }, orderBy: { createdAt: 'asc' }, omit: WITHOUT_LOGO });
     if (!byDefault?.isActive) throw new NotFoundException(NOT_FOUND);
     return byDefault;
   }
 
-  findById(id: string): Promise<Company | null> {
-    return this.prisma.unscoped.company.findUnique({ where: { id } });
+  findById(id: string): Promise<CompanyRecord | null> {
+    return this.prisma.unscoped.company.findUnique({ where: { id }, omit: WITHOUT_LOGO });
   }
 }

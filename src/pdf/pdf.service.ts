@@ -2,12 +2,45 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { FinanceService } from '../finance/finance.service';
-import { TenantContext } from '../tenant/tenant-context';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  PLATFORM_CREDIT,
+  brandLegalName,
+  brandName,
+  brandPrimary,
+  brandTagline,
+  contactParts,
+  formatDate,
+  formatMoney,
+  loadRasterLogo,
+} from '../tenant/company-branding';
 
-/** Marca de la empresa del contexto (cada empresa emite sus documentos con su nombre y color) */
-const brandName = () => TenantContext.company()?.name || process.env.PRODUCT_NAME || 'VELTOR';
-const brandTagline = () => TenantContext.company()?.tagline || '';
-const brandColor = () => TenantContext.company()?.primaryColor || '#0B132B';
+type Logo = { data: Buffer; mime: string } | null;
+
+/**
+ * Encabezado con la marca de la empresa del contexto: su logo (PNG/JPEG) o, si no tiene, su nombre;
+ * el eslogan debajo; a la derecha el título del documento y sus referencias.
+ */
+function drawHeader(doc: PDFKit.PDFDocument, logo: Logo, title: string, refs: string[], colorMuted: string, colorTitle: string) {
+  const primary = brandPrimary();
+  let drewLogo = false;
+  if (logo) {
+    try {
+      doc.image(logo.data, 36, 30, { fit: [170, 42], valign: 'center' });
+      drewLogo = true;
+    } catch {
+      drewLogo = false;
+    }
+  }
+  if (!drewLogo) doc.fontSize(22).fillColor(primary).font('Helvetica-Bold').text(brandName(), 36, 36, { width: 260, lineBreak: false });
+  const tagline = brandTagline();
+  if (tagline) doc.fontSize(8.5).fillColor(colorMuted).font('Helvetica').text(tagline, 36, 74, { width: 260, lineBreak: false });
+
+  doc.fontSize(12).fillColor(colorTitle).font('Helvetica-Bold').text(title, 300, 38, { align: 'right' });
+  doc.fontSize(9).font('Helvetica').fillColor(colorMuted);
+  refs.forEach((r, i) => doc.text(r, 300, 54 + i * 14, { align: 'right' }));
+  doc.moveTo(36, 88).lineTo(576, 88).strokeColor(primary).lineWidth(1.5).stroke();
+}
 
 // Línea del pie de página; las filas de las tablas no deben pasar de aquí
 const FOOTER_TOP = 735;
@@ -23,20 +56,25 @@ function drawFooters(doc: PDFKit.PDFDocument, note: string, colorBorder: string,
     const bottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
     doc.moveTo(36, FOOTER_TOP).lineTo(576, FOOTER_TOP).strokeColor(colorBorder).lineWidth(0.5).stroke();
+    const contacts = [brandLegalName(), ...contactParts()].join('  ·  ');
     doc
-      .fontSize(8)
+      .fontSize(7.5)
       .font('Helvetica')
       .fillColor(colorMuted)
-      .text(`${brandName()} — Una solución tecnológica de Nevora Software`, 36, 745, { align: 'left', lineBreak: false })
-      .text(note, 36, 757, { align: 'left', lineBreak: false })
-      .text(`Página ${i - range.start + 1} de ${range.count}`, 36, 745, { width: 540, align: 'right', lineBreak: false });
+      .text(contacts, 36, 741, { width: 440, align: 'left', lineBreak: false })
+      .text(note, 36, 752, { width: 540, align: 'left', lineBreak: false })
+      .text(PLATFORM_CREDIT, 36, 763, { width: 540, align: 'left', lineBreak: false })
+      .text(`Página ${i - range.start + 1} de ${range.count}`, 36, 741, { width: 540, align: 'right', lineBreak: false });
     doc.page.margins.bottom = bottomMargin;
   }
 }
 
 @Injectable()
 export class PdfService {
-  constructor(private readonly financeService: FinanceService) {}
+  constructor(
+    private readonly financeService: FinanceService,
+    private readonly prisma: PrismaService,
+  ) {}
 
   /** `scope` restringe el crédito (p. ej. al cliente autenticado en el portal). */
   async generateAmortizationSchedulePdf(loanId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
@@ -52,6 +90,7 @@ export class PdfService {
       closingBalance: inst.closingBalance,
       status: inst.status,
     }));
+    const logo = await loadRasterLogo(this.prisma.unscoped);
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({ margin: 36, size: 'LETTER', bufferPages: true });
@@ -62,36 +101,14 @@ export class PdfService {
       doc.on('error', reject);
 
       // Colores de marca de la empresa
-      const colorNightBlue = brandColor();
+      const colorNightBlue = brandPrimary();
       const colorGraphite = '#1E293B';
       const colorMuted = '#64748B';
       const colorBorder = '#CBD5E1';
       const colorRowAlt = '#F8FAFC';
 
-      // Encabezado
-      doc
-        .fontSize(22)
-        .fillColor(colorNightBlue)
-        .font('Helvetica-Bold')
-        .text(brandName(), 36, 36)
-        .fontSize(8.5)
-        .fillColor(colorMuted)
-        .font('Helvetica')
-        .text(brandTagline(), 36, 62);
-
-      doc
-        .fontSize(12)
-        .fillColor(colorGraphite)
-        .font('Helvetica-Bold')
-        .text('TABLA DE AMORTIZACIÓN CONTRACTUAL', 300, 38, { align: 'right' })
-        .fontSize(9)
-        .font('Helvetica')
-        .fillColor(colorMuted)
-        .text(`Crédito N°: ${loan.code}`, 300, 54, { align: 'right' })
-        .text(`Fecha Emisión: ${new Date().toLocaleDateString('es-SV')}`, 300, 68, { align: 'right' });
-
-      // Línea divisoria
-      doc.moveTo(36, 88).lineTo(576, 88).strokeColor(colorNightBlue).lineWidth(1.5).stroke();
+      // Encabezado con la marca de la empresa
+      drawHeader(doc, logo, 'TABLA DE AMORTIZACIÓN CONTRACTUAL', [`Crédito N°: ${loan.code}`, `Fecha Emisión: ${formatDate()}`], colorMuted, colorGraphite);
 
       // Cuadro de Información del Crédito y Cliente
       const boxTop = 96;
@@ -107,7 +124,7 @@ export class PdfService {
       doc.text(`Teléfono: ${loan.customer.phone}`, 46, boxTop + 46);
       doc.text(`Vehículo: ${loan.vehicle.brand} ${loan.vehicle.model} ${loan.vehicle.year}`, 46, boxTop + 58);
 
-      doc.text(`Monto Financiado: $${Number(loan.originalPrincipal).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 310, boxTop + 22);
+      doc.text(`Monto Financiado: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 22);
       doc.text(`Tasa Mensual: ${(Number(loan.monthlyRate) * 100).toFixed(2)}%`, 310, boxTop + 34);
       doc.text(`Plazo: ${loan.termCount} meses (${loan.frequency})`, 310, boxTop + 46);
       doc.text(`Base de Cálculo: ${loan.dayCount}`, 310, boxTop + 58);
@@ -160,11 +177,11 @@ export class PdfService {
         doc.fillColor(colorGraphite);
         doc.text(item.number.toString(), 42, currentY + 4, { width: 25, align: 'center' });
         doc.text(new Date(item.dueDate).toISOString().split('T')[0], 72, currentY + 4, { width: 70, align: 'center' });
-        doc.text(`$${Number(item.openingBalance).toFixed(2)}`, 148, currentY + 4, { width: 80, align: 'right' });
-        doc.text(`$${Number(item.scheduledPrincipal).toFixed(2)}`, 234, currentY + 4, { width: 75, align: 'right' });
-        doc.text(`$${Number(item.scheduledInterest).toFixed(2)}`, 315, currentY + 4, { width: 75, align: 'right' });
-        doc.font('Helvetica-Bold').text(`$${Number(item.scheduledPayment).toFixed(2)}`, 396, currentY + 4, { width: 85, align: 'right' });
-        doc.font('Helvetica').text(`$${Number(item.closingBalance).toFixed(2)}`, 487, currentY + 4, { width: 80, align: 'right' });
+        doc.text(formatMoney(item.openingBalance), 148, currentY + 4, { width: 80, align: 'right' });
+        doc.text(formatMoney(item.scheduledPrincipal), 234, currentY + 4, { width: 75, align: 'right' });
+        doc.text(formatMoney(item.scheduledInterest), 315, currentY + 4, { width: 75, align: 'right' });
+        doc.font('Helvetica-Bold').text(formatMoney(item.scheduledPayment), 396, currentY + 4, { width: 85, align: 'right' });
+        doc.font('Helvetica').text(formatMoney(item.closingBalance), 487, currentY + 4, { width: 80, align: 'right' });
 
         currentY += 16;
       }
@@ -179,6 +196,7 @@ export class PdfService {
     // Historial de pagos del más reciente al más antiguo
     const loan = { ...rawLoan, payments: [...rawLoan.payments].reverse() };
     const nextPending = snapshot.current.installments.find((i) => i.status !== 'PAID');
+    const logo = await loadRasterLogo(this.prisma.unscoped);
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({ margin: 36, size: 'LETTER', bufferPages: true });
@@ -188,35 +206,14 @@ export class PdfService {
       doc.on('end', () => resolve(Buffer.concat(buffers)));
       doc.on('error', reject);
 
-      const colorNightBlue = brandColor();
+      const colorNightBlue = brandPrimary();
       const colorGraphite = '#1E293B';
       const colorMuted = '#64748B';
       const colorBorder = '#CBD5E1';
       const colorRowAlt = '#F8FAFC';
 
-      // Encabezado
-      doc
-        .fontSize(22)
-        .fillColor(colorNightBlue)
-        .font('Helvetica-Bold')
-        .text(brandName(), 36, 36)
-        .fontSize(8.5)
-        .fillColor(colorMuted)
-        .font('Helvetica')
-        .text(brandTagline(), 36, 62);
-
-      doc
-        .fontSize(13)
-        .fillColor(colorNightBlue)
-        .font('Helvetica-Bold')
-        .text('ESTADO DE CUENTA MENSUAL', 300, 38, { align: 'right' })
-        .fontSize(9)
-        .font('Helvetica')
-        .fillColor(colorMuted)
-        .text(`Referencia: ${loan.code}`, 300, 54, { align: 'right' })
-        .text(`Corte: ${new Date().toLocaleDateString('es-SV')}`, 300, 68, { align: 'right' });
-
-      doc.moveTo(36, 88).lineTo(576, 88).strokeColor(colorNightBlue).lineWidth(1.5).stroke();
+      // Encabezado con la marca de la empresa
+      drawHeader(doc, logo, 'ESTADO DE CUENTA MENSUAL', [`Referencia: ${loan.code}`, `Corte: ${formatDate()}`], colorMuted, colorNightBlue);
 
       // Cuadro de Resumen Financiero
       const boxTop = 96;
@@ -234,10 +231,10 @@ export class PdfService {
 
       const totalPaid = loan.payments.reduce((acc, p) => acc + Number(p.amountApplied), 0);
 
-      doc.text(`Monto Inicial: $${Number(loan.originalPrincipal).toFixed(2)}`, 310, boxTop + 24);
-      doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: $${Number(snapshot.principalBalance).toFixed(2)}`, 310, boxTop + 38);
-      doc.font('Helvetica').fillColor(colorGraphite).text(`Total Abonado a la Fecha: $${totalPaid.toFixed(2)}`, 310, boxTop + 52);
-      doc.text(`Próxima Cuota: ${nextPending ? `$${Number(nextPending.payment).toFixed(2)} (${nextPending.dueDate})` : 'Crédito cancelado'}`, 310, boxTop + 66);
+      doc.text(`Monto Inicial: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 24);
+      doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: ${formatMoney(snapshot.principalBalance)}`, 310, boxTop + 38);
+      doc.font('Helvetica').fillColor(colorGraphite).text(`Total Abonado a la Fecha: ${formatMoney(totalPaid)}`, 310, boxTop + 52);
+      doc.text(`Próxima Cuota: ${nextPending ? `${formatMoney(nextPending.payment)} (${nextPending.dueDate})` : 'Crédito cancelado'}`, 310, boxTop + 66);
 
       // Tabla de Historial de Pagos Recientes
       let currentY = boxTop + 105;
@@ -272,7 +269,7 @@ export class PdfService {
           doc.text(p.kind, 195, currentY + 5, { width: 110, align: 'left' });
           doc.text(p.paymentMethod, 310, currentY + 5, { width: 80, align: 'center' });
           doc.text(p.referenceNumber || '-', 395, currentY + 5, { width: 85, align: 'left' });
-          doc.font('Helvetica-Bold').text(`$${Number(p.amountApplied).toFixed(2)}`, 485, currentY + 5, { width: 85, align: 'right' });
+          doc.font('Helvetica-Bold').text(formatMoney(p.amountApplied), 485, currentY + 5, { width: 85, align: 'right' });
           doc.font('Helvetica');
           currentY += 18;
         }
