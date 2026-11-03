@@ -2,6 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { FinanceService } from '../finance/finance.service';
+import { TenantContext } from '../tenant/tenant-context';
+
+/** Marca de la empresa del contexto (cada empresa emite sus documentos con su nombre y color) */
+const brandName = () => TenantContext.company()?.name || process.env.PRODUCT_NAME || 'VELTOR';
+const brandTagline = () => TenantContext.company()?.tagline || '';
+const brandColor = () => TenantContext.company()?.primaryColor || '#0B132B';
 
 // Línea del pie de página; las filas de las tablas no deben pasar de aquí
 const FOOTER_TOP = 735;
@@ -21,7 +27,7 @@ function drawFooters(doc: PDFKit.PDFDocument, note: string, colorBorder: string,
       .fontSize(8)
       .font('Helvetica')
       .fillColor(colorMuted)
-      .text('VELTOR — Una solución tecnológica de Nevora Software', 36, 745, { align: 'left', lineBreak: false })
+      .text(`${brandName()} — Una solución tecnológica de Nevora Software`, 36, 745, { align: 'left', lineBreak: false })
       .text(note, 36, 757, { align: 'left', lineBreak: false })
       .text(`Página ${i - range.start + 1} de ${range.count}`, 36, 745, { width: 540, align: 'right', lineBreak: false });
     doc.page.margins.bottom = bottomMargin;
@@ -55,8 +61,8 @@ export class PdfService {
       doc.on('end', () => resolve(Buffer.concat(buffers)));
       doc.on('error', reject);
 
-      // Colores de marca VELTOR
-      const colorNightBlue = '#0B132B';
+      // Colores de marca de la empresa
+      const colorNightBlue = brandColor();
       const colorGraphite = '#1E293B';
       const colorMuted = '#64748B';
       const colorBorder = '#CBD5E1';
@@ -67,11 +73,11 @@ export class PdfService {
         .fontSize(22)
         .fillColor(colorNightBlue)
         .font('Helvetica-Bold')
-        .text('VELTOR', 36, 36)
+        .text(brandName(), 36, 36)
         .fontSize(8.5)
         .fillColor(colorMuted)
         .font('Helvetica')
-        .text('Financiamiento inteligente. Movilidad a tu alcance.', 36, 62);
+        .text(brandTagline(), 36, 62);
 
       doc
         .fontSize(12)
@@ -182,7 +188,7 @@ export class PdfService {
       doc.on('end', () => resolve(Buffer.concat(buffers)));
       doc.on('error', reject);
 
-      const colorNightBlue = '#0B132B';
+      const colorNightBlue = brandColor();
       const colorGraphite = '#1E293B';
       const colorMuted = '#64748B';
       const colorBorder = '#CBD5E1';
@@ -193,11 +199,11 @@ export class PdfService {
         .fontSize(22)
         .fillColor(colorNightBlue)
         .font('Helvetica-Bold')
-        .text('VELTOR', 36, 36)
+        .text(brandName(), 36, 36)
         .fontSize(8.5)
         .fillColor(colorMuted)
         .font('Helvetica')
-        .text('Financiamiento inteligente. Movilidad a tu alcance.', 36, 62);
+        .text(brandTagline(), 36, 62);
 
       doc
         .fontSize(13)

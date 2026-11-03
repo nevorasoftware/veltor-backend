@@ -121,7 +121,8 @@ export class CustomersService {
     if (!customer) throw new NotFoundException('Cliente no encontrado');
 
     const email = customer.email.toLowerCase().trim();
-    const emailOwner = await this.prisma.user.findUnique({ where: { email } });
+    // El correo de acceso es único en toda la plataforma (no solo en la empresa)
+    const emailOwner = await this.prisma.unscoped.user.findUnique({ where: { email } });
     if (emailOwner && emailOwner.customerId !== customer.id) {
       throw new ConflictException('El correo del cliente ya está en uso por otro usuario del sistema.');
     }

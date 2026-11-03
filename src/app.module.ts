@@ -7,6 +7,7 @@ import { DomainEventsModule } from './common/domain-events';
 import { MailModule } from './mail/mail.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { TenantModule } from './tenant/tenant.module';
 import { AuthModule } from './auth/auth.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 import { LeadsModule } from './leads/leads.module';
@@ -19,6 +20,7 @@ import { SettingsModule } from './settings/settings.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { PortalModule } from './portal/portal.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
+import { CompaniesModule } from './companies/companies.module';
 import { StorageModule } from './storage/storage.module';
 import { HealthController } from './health/health.controller';
 
@@ -36,6 +38,7 @@ import { HealthController } from './health/health.controller';
     ]),
     ScheduleModule.forRoot(),
     PrismaModule,
+    TenantModule,
     DomainEventsModule,
     StorageModule,
     MailModule,
@@ -51,6 +54,7 @@ import { HealthController } from './health/health.controller';
     ExpensesModule,
     PortalModule,
     NotificationsModule,
+    CompaniesModule,
     BootstrapModule,
   ],
   controllers: [HealthController],

@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
 import { Response } from 'express';
 import { Public } from '../auth/public.decorator';
+import { SkipTenant } from '../tenant/skip-tenant.decorator';
 import { Roles } from '../auth/roles.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { GoogleDriveService } from './google-drive.service';
@@ -29,13 +30,15 @@ export class StorageController {
   }
 
   @Public()
+  @SkipTenant()
   @Get('media/vehicle-images/:fileId')
   @ApiOperation({ summary: 'Foto de vehículo almacenada en Google Drive (pública, solo imágenes del catálogo)' })
   async vehicleImage(@Param('fileId') fileId: string, @Res() res: Response) {
     let file = this.cache.get(fileId);
     if (!file) {
-      // Solo se sirven archivos registrados como foto de vehículo: nunca documentos de clientes
-      const image = await this.prisma.vehicleImage.findUnique({ where: { driveFileId: fileId }, select: { id: true } });
+      // Solo se sirven archivos registrados como foto de vehículo: nunca documentos de clientes.
+      // La URL de la foto no lleva empresa (la carga un <img>): driveFileId es único en toda la plataforma.
+      const image = await this.prisma.unscoped.vehicleImage.findUnique({ where: { driveFileId: fileId }, select: { id: true } });
       if (!image) throw new NotFoundException('Imagen no encontrada');
       file = await this.drive.download(fileId).catch(() => {
         throw new NotFoundException('La imagen no está disponible en el almacenamiento');

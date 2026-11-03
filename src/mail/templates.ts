@@ -3,7 +3,10 @@
  * para que se vea bien en Gmail, Outlook y clientes móviles.
  */
 
-const brand = () => process.env.PRODUCT_NAME || 'VELTOR';
+import { TenantContext } from '../tenant/tenant-context';
+
+/** Cada empresa firma sus propios correos; fuera de contexto se usa la marca de la plataforma */
+const brand = () => TenantContext.company()?.name || process.env.PRODUCT_NAME || 'VELTOR';
 const company = () => process.env.PRODUCT_COMPANY || 'Nevora Software';
 const publicUrl = () => (process.env.APP_PUBLIC_URL || '').replace(/\/+$/, '');
 
@@ -21,9 +24,10 @@ export const esc = (v: unknown) =>
     .replace(/"/g, '&quot;');
 
 export const usd = (v: unknown) =>
-  new Intl.NumberFormat(process.env.APP_LOCALE || 'es-SV', { style: 'currency', currency: process.env.APP_CURRENCY || 'USD' }).format(
-    Number(v) || 0,
-  );
+  new Intl.NumberFormat(TenantContext.company()?.locale || process.env.APP_LOCALE || 'es-SV', {
+    style: 'currency',
+    currency: TenantContext.company()?.currency || process.env.APP_CURRENCY || 'USD',
+  }).format(Number(v) || 0);
 
 /** AAAA-MM-DD → DD/MM/AAAA sin pasar por zonas horarias */
 export const dateSV = (d: string) => {
@@ -297,6 +301,28 @@ export function accountStatementMail(p: { fullName: string; loanCode: string; as
     subject: `${brand()}: estado de cuenta del crédito ${p.loanCode}`,
     html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${portal.html}`),
     text: textOf(title, [intro, portal.text].filter(Boolean), rows),
+  };
+}
+
+/** Acceso al panel para un usuario del personal creado desde la plataforma (p. ej. el primer administrador). */
+export function staffAccessMail(p: {
+  fullName: string;
+  email: string;
+  temporaryPassword: string;
+  loginUrl?: string | null;
+}): RenderedMail {
+  const title = `Tu acceso a ${brand()}`;
+  const rows: Row[] = [
+    ['Empresa', brand()],
+    ['Usuario', p.email],
+    ['Contraseña temporal', p.temporaryPassword],
+  ];
+  const intro = `Hola ${firstName(p.fullName)}, se creó tu usuario de administrador de ${brand()}. Al ingresar por primera vez se te pedirá cambiar la contraseña temporal.`;
+  const link = p.loginUrl ? { html: button('Ingresar al panel', p.loginUrl), text: `Ingreso: ${p.loginUrl}` } : { html: '', text: '' };
+  return {
+    subject: `${brand()}: tu acceso de administrador`,
+    html: layout(title, `<p>${esc(intro)}</p>${rowsTable(rows)}${link.html}`),
+    text: textOf(title, [intro, link.text].filter(Boolean), rows),
   };
 }
 

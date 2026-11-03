@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { TenantContext } from '../tenant/tenant-context';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const FILES_URL = 'https://www.googleapis.com/drive/v3/files';
@@ -33,15 +35,23 @@ const quoteQuery = (s: string) => `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\
 
 /**
  * Almacenamiento en Google Drive con la API REST (OAuth2 con refresh token, alcance drive.file).
- * Estructura: VELTOR/Vehiculos/<vehículo>, VELTOR/Creditos/<número de crédito>, VELTOR/Clientes/<cliente>.
+ * Estructura por empresa: VELTOR/<slug>/Vehiculos/<vehículo>, VELTOR/<slug>/Creditos/<número de crédito>,
+ * VELTOR/<slug>/Clientes/<cliente>. La empresa sale de TenantContext.
  * Con drive.file la aplicación solo ve los archivos y carpetas que ella misma creó.
  */
 @Injectable()
 export class GoogleDriveService {
   private readonly logger = new Logger(GoogleDriveService.name);
   private accessToken: { value: string; expiresAt: number } | null = null;
-  /** ruta "VELTOR/Creditos/CRE-2026-0001" → id; se guarda la promesa para no duplicar carpetas en llamadas simultáneas */
-  private readonly folders = new Map<string, Promise<string>>();
+  /**
+   * companyId → (ruta "VELTOR/<slug>/Creditos/CRE-2026-0001" → id). Es solo una caché de IDs que existen en Drive
+   * (se reconstruye buscando por nombre). Se guarda la promesa para no duplicar carpetas en llamadas simultáneas.
+   */
+  private readonly folders = new Map<string, Map<string, Promise<string>>>();
+  /** companyId → slug (carpeta de la empresa) */
+  private readonly slugs = new Map<string, string>();
+
+  constructor(private readonly prisma: PrismaService) {}
 
   private get clientId() {
     return process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GMAIL_CLIENT_ID;
@@ -70,8 +80,9 @@ export class GoogleDriveService {
       };
     }
     try {
-      const rootId = await this.ensureFolder([]);
-      return { enabled: true, driver: 'gdrive', rootFolder: this.rootName, rootFolderUrl: this.folderUrl(rootId) };
+      const folderId = await this.ensureFolder([]);
+      const rootFolder = [this.rootName, await this.companySlug()].join('/');
+      return { enabled: true, driver: 'gdrive', rootFolder, rootFolderUrl: this.folderUrl(folderId) };
     } catch (err: any) {
       return { enabled: true, driver: 'gdrive', rootFolder: this.rootName, error: String(err?.message || err) };
     }
@@ -92,7 +103,7 @@ export class GoogleDriveService {
       headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
       body: new Uint8Array(body),
     });
-    this.logger.log(`Archivo subido a Drive: ${[this.rootName, ...folderPath, file.name].join('/')}`);
+    this.logger.log(`Archivo subido a Drive: ${[this.rootName, await this.companySlug(), ...folderPath, file.name].join('/')}`);
     return file;
   }
 
@@ -118,21 +129,54 @@ export class GoogleDriveService {
     }
   }
 
-  /** Devuelve el id de la carpeta VELTOR/<...folderPath>, creándola si no existe. */
-  ensureFolder(folderPath: string[]): Promise<string> {
-    const names = folderPath.map(driveName);
+  /** Devuelve el id de la carpeta VELTOR/<slug de la empresa actual>/<...folderPath>, creándola si no existe. */
+  async ensureFolder(folderPath: string[]): Promise<string> {
+    const companyId = TenantContext.requireCompanyId('Google Drive');
+    const slug = await this.companySlug();
+    return this.ensurePath(companyId, [slug, ...folderPath].map(driveName));
+  }
+
+  /** Olvida la carpeta en caché de una empresa (p. ej. al cambiar su slug). */
+  forgetCompany(companyId: string) {
+    this.folders.delete(companyId);
+    this.slugs.delete(companyId);
+  }
+
+  private ensurePath(companyId: string, names: string[]): Promise<string> {
+    let cache = this.folders.get(companyId);
+    if (!cache) this.folders.set(companyId, (cache = new Map()));
     const key = [this.rootName, ...names].join('/');
-    let pending = this.folders.get(key);
+    let pending = cache.get(key);
     if (!pending) {
       pending = (async () => {
         if (!names.length) return this.findOrCreateFolder(this.rootName, 'root');
-        const parentId = await this.ensureFolder(folderPath.slice(0, -1));
+        const parentId = await this.ensurePath(companyId, names.slice(0, -1));
         return this.findOrCreateFolder(names[names.length - 1], parentId);
       })();
-      this.folders.set(key, pending);
-      pending.catch(() => this.folders.delete(key));
+      const store = cache;
+      store.set(key, pending);
+      pending.catch(() => store.delete(key));
     }
     return pending;
+  }
+
+  /** Slug de la empresa actual (de la petición o, si no, de la BD) */
+  private async companySlug(): Promise<string> {
+    const companyId = TenantContext.requireCompanyId('Google Drive');
+    const fromRequest = TenantContext.company()?.slug;
+    if (fromRequest) {
+      if (this.slugs.get(companyId) !== fromRequest) this.forgetCompany(companyId);
+      this.slugs.set(companyId, fromRequest);
+      return fromRequest;
+    }
+    let slug = this.slugs.get(companyId);
+    if (!slug) {
+      const company = await this.prisma.unscoped.company.findUnique({ where: { id: companyId }, select: { slug: true } });
+      if (!company) throw new Error(`Empresa ${companyId} no encontrada`);
+      slug = company.slug;
+      this.slugs.set(companyId, slug);
+    }
+    return slug;
   }
 
   folderUrl(id: string) {

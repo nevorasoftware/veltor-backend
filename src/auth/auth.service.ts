@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
@@ -11,8 +11,14 @@ export interface JwtPayload {
   role: UserRole;
   fullName: string;
   customerId?: string | null;
+  /** Empresa del usuario; null solo para el SUPERADMIN de plataforma */
+  companyId: string | null;
 }
 
+/**
+ * El login es global (correo + contraseña) y la empresa sale del usuario, por eso este servicio usa
+ * `prisma.unscoped`: el correo es único en toda la plataforma.
+ */
 @Injectable()
 export class AuthService {
   constructor(
@@ -21,7 +27,7 @@ export class AuthService {
   ) {}
 
   async validateUser(email: string, pass: string) {
-    const user = await this.prisma.user.findUnique({
+    const user = await this.prisma.unscoped.user.findUnique({
       where: { email: email.toLowerCase().trim() },
     });
     if (!user || !user.isActive) return null;
@@ -38,8 +44,23 @@ export class AuthService {
       throw new UnauthorizedException('Correo electrónico o contraseña incorrectos.');
     }
 
+    const isSuperadmin = user.role === UserRole.SUPERADMIN;
+    const company =
+      !isSuperadmin && user.companyId
+        ? await this.prisma.unscoped.company.findUnique({
+            where: { id: user.companyId },
+            select: { id: true, slug: true, name: true, isActive: true },
+          })
+        : null;
+    if (!isSuperadmin) {
+      if (!company) throw new UnauthorizedException('Su usuario no está asociado a una empresa.');
+      if (!company.isActive) {
+        throw new ForbiddenException('La empresa está inactiva. Comuníquese con el administrador de la plataforma.');
+      }
+    }
+
     // Registrar último inicio de sesión
-    await this.prisma.user.update({
+    await this.prisma.unscoped.user.update({
       where: { id: user.id },
       data: { lastLoginAt: new Date() },
     });
@@ -50,6 +71,7 @@ export class AuthService {
       role: user.role,
       fullName: user.fullName,
       customerId: user.customerId,
+      companyId: company?.id ?? null,
     };
 
     const accessToken = this.jwtService.sign(payload);
@@ -62,13 +84,15 @@ export class AuthService {
         fullName: user.fullName,
         role: user.role,
         customerId: user.customerId,
+        companyId: payload.companyId,
+        company: company ? { id: company.id, slug: company.slug, name: company.name } : null,
         mustChangePass: user.mustChangePass,
       },
     };
   }
 
   async getProfile(userId: string) {
-    const user = await this.prisma.user.findUnique({
+    const user = await this.prisma.unscoped.user.findUnique({
       where: { id: userId },
       select: {
         id: true,
@@ -77,6 +101,8 @@ export class AuthService {
         role: true,
         phone: true,
         customerId: true,
+        companyId: true,
+        company: { select: { id: true, slug: true, name: true } },
         mustChangePass: true,
         createdAt: true,
       },
@@ -86,7 +112,7 @@ export class AuthService {
   }
 
   async changePassword(userId: string, currentPassword: string, newPassword: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const user = await this.prisma.unscoped.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) throw new NotFoundException('Usuario no encontrado');
 
     const matches = await argon2.verify(user.passwordHash, currentPassword);
@@ -95,7 +121,7 @@ export class AuthService {
       throw new BadRequestException('La nueva contraseña debe ser distinta a la actual.');
     }
 
-    await this.prisma.user.update({
+    await this.prisma.unscoped.user.update({
       where: { id: userId },
       data: { passwordHash: await argon2.hash(newPassword), mustChangePass: false },
     });

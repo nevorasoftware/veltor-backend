@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { NotificationStatus } from '@prisma/client';
 import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantContext } from '../tenant/tenant-context';
 
 export interface MailAttachment {
   filename: string;
@@ -88,11 +89,13 @@ export class MailService {
   }
 
   private async compose(mail: OutgoingMail): Promise<Buffer> {
-    const fromName = process.env.MAIL_FROM_NAME || process.env.PRODUCT_NAME || 'VELTOR';
+    // Cada empresa envía con su nombre y recibe las respuestas en su correo de contacto
+    const tenant = TenantContext.company();
+    const fromName = tenant?.name || process.env.MAIL_FROM_NAME || process.env.PRODUCT_NAME || 'VELTOR';
     const info = await this.composer.sendMail({
       from: { name: fromName, address: process.env.GMAIL_SENDER! },
       to: mail.to,
-      replyTo: process.env.MAIL_REPLY_TO || undefined,
+      replyTo: tenant?.contactEmail || process.env.MAIL_REPLY_TO || undefined,
       subject: mail.subject,
       html: mail.html,
       text: mail.text,

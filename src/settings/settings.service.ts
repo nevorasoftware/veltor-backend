@@ -1,8 +1,12 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TenantContext } from '../tenant/tenant-context';
 
 const RATE_KEY = 'PREFERENTIAL_MONTHLY_RATE';
 const STAFF_EMAILS_KEY = 'NOTIFY_STAFF_EMAILS';
+
+/** Llave única de un parámetro dentro de la empresa actual */
+const settingKey = (key: string) => ({ companyId_key: { companyId: TenantContext.requireCompanyId('SystemSetting'), key } });
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -67,7 +71,7 @@ export class SettingsService {
 
   async getPublicSettings() {
     const [setting, product] = await Promise.all([
-      this.prisma.systemSetting.findUnique({ where: { key: RATE_KEY } }),
+      this.prisma.systemSetting.findUnique({ where: settingKey(RATE_KEY) }),
       this.activeProduct(),
     ]);
 
@@ -96,7 +100,7 @@ export class SettingsService {
 
     const updatedSetting = await this.prisma.$transaction(async (tx) => {
       const saved = await tx.systemSetting.upsert({
-        where: { key: RATE_KEY },
+        where: settingKey(RATE_KEY),
         update: { value: monthlyRate.toString(), isPublic: true },
         create: {
           key: RATE_KEY,
@@ -172,7 +176,7 @@ export class SettingsService {
     await this.prisma.$transaction(async (tx) => {
       for (const [k, value, description] of values) {
         await tx.systemSetting.upsert({
-          where: { key: COLLECTION_KEYS[k] },
+          where: settingKey(COLLECTION_KEYS[k]),
           update: { value },
           create: { key: COLLECTION_KEYS[k], value, description, isPublic: false },
         });
@@ -189,12 +193,12 @@ export class SettingsService {
 
   /** Correos del personal que reciben avisos (nuevo prospecto, crédito aprobado). Si no se han parametrizado, usa NOTIFY_STAFF_EMAILS. */
   async getStaffNotificationEmails(): Promise<string[]> {
-    const setting = await this.prisma.systemSetting.findUnique({ where: { key: STAFF_EMAILS_KEY } });
+    const setting = await this.prisma.systemSetting.findUnique({ where: settingKey(STAFF_EMAILS_KEY) });
     return parseEmails(setting ? setting.value : process.env.NOTIFY_STAFF_EMAILS || '');
   }
 
   async getNotificationSettings() {
-    const setting = await this.prisma.systemSetting.findUnique({ where: { key: STAFF_EMAILS_KEY } });
+    const setting = await this.prisma.systemSetting.findUnique({ where: settingKey(STAFF_EMAILS_KEY) });
     return {
       staffEmails: await this.getStaffNotificationEmails(),
       source: setting ? 'database' : 'environment',
@@ -208,7 +212,7 @@ export class SettingsService {
     if (invalid.length) throw new BadRequestException(`Correos inválidos: ${invalid.join(', ')}`);
 
     const saved = await this.prisma.systemSetting.upsert({
-      where: { key: STAFF_EMAILS_KEY },
+      where: settingKey(STAFF_EMAILS_KEY),
       update: { value: clean.join(',') },
       create: {
         key: STAFF_EMAILS_KEY,

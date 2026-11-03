@@ -7,6 +7,8 @@ import { MailService, MailResult } from '../mail/mail.service';
 import { FinanceService } from '../finance/finance.service';
 import { PdfService } from '../pdf/pdf.service';
 import { SettingsService } from '../settings/settings.service';
+import { TenantContext } from '../tenant/tenant-context';
+import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import { InstallmentView, addDays, todayInTz, D, fmt } from '../finance/engine';
 import {
   accountStatementMail,
@@ -22,6 +24,20 @@ import {
 } from '../mail/templates';
 
 const TIMEZONE = process.env.APP_TIMEZONE || 'America/El_Salvador';
+/** Hora local (de cada empresa) a la que corre la cobranza diaria */
+const COLLECTION_HOUR = Number(process.env.PAYMENT_REMINDER_HOUR ?? 8);
+
+/** Zona horaria de la empresa del contexto */
+const companyTz = () => TenantContext.company()?.timezone || TIMEZONE;
+
+/** Hora (0-23) en una zona horaria */
+export function localHour(timeZone: string, now = new Date()): number {
+  try {
+    return Number(new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hourCycle: 'h23' }).format(now)) % 24;
+  } catch {
+    return Number(new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, hour: 'numeric', hourCycle: 'h23' }).format(now)) % 24;
+  }
+}
 
 const vehicleLabel = (v?: { brand: string; model: string; year: number } | null) =>
   v ? `${v.brand} ${v.model} ${v.year}` : null;
@@ -183,7 +199,7 @@ export class NotificationsService implements OnModuleInit {
       ...accountStatementMail({
         fullName: loan.customer.fullName,
         loanCode: loan.code,
-        asOf: todayInTz(TIMEZONE),
+        asOf: todayInTz(companyTz()),
         principalBalance: snapshot.principalBalance,
       }),
     });
@@ -214,18 +230,40 @@ export class NotificationsService implements OnModuleInit {
   }
 
   /**
-   * Daemon diario de cobranza (8:00, hora de El Salvador). Para cada crédito activo recalcula la mora al día
-   * y envía:
+   * Daemon de cobranza: corre cada hora en punto y, para cada empresa activa cuya hora local sean las 8:00
+   * (PAYMENT_REMINDER_HOUR), ejecuta su cobranza diaria dentro de TenantContext. Recorrer las empresas es una
+   * tarea de plataforma: por eso la lista se lee con prisma.unscoped.
+   */
+  @Cron('0 * * * *', { name: 'payment-reminders' })
+  async runDailyCollections(now = new Date()) {
+    if (!this.mail.isConfigured()) return [];
+    const companies = await this.prisma.unscoped.company.findMany({ where: { isActive: true }, orderBy: { createdAt: 'asc' } });
+    const results: { company: string; checked: number; reminders: number; overdueNotices: number; sent: number }[] = [];
+    for (const company of companies) {
+      if (localHour(company.timezone, now) !== COLLECTION_HOUR) continue;
+      try {
+        const r = await TenantContext.run(company.id, () => this.sendPaymentReminders(), toCompanyInfo(company));
+        results.push({ company: company.slug, ...r });
+      } catch (err: any) {
+        this.logger.error(`Cobranza de la empresa ${company.slug}: ${err?.message || err}`);
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Cobranza diaria de la empresa del contexto (la llama el daemon por empresa o el botón "ejecutar ahora").
+   * Para cada crédito activo recalcula la mora al día y envía:
    * - recordatorio de pago N días antes del vencimiento (N = parámetro "días de recordatorio");
    * - aviso de cuota vencida al terminar los días de gracia, con el saldo de la cuota y la mora acumulada,
    *   repetido cada M días mientras siga pendiente (M = parámetro "repetir aviso de mora").
    * Las claves de deduplicación evitan reenvíos aunque se ejecute varias veces el mismo día.
    */
-  @Cron('0 8 * * *', { name: 'payment-reminders', timeZone: TIMEZONE })
   async sendPaymentReminders() {
+    TenantContext.requireCompanyId('cobranza diaria');
     if (!this.mail.isConfigured()) return { checked: 0, reminders: 0, overdueNotices: 0, sent: 0 };
 
-    const today = todayInTz(TIMEZONE);
+    const today = todayInTz(companyTz());
     const cfg = await this.settings.getCollectionSettings();
     const reminderTarget = addDays(today, cfg.reminderDaysBefore);
 
@@ -288,7 +326,7 @@ export class NotificationsService implements OnModuleInit {
     }
 
     this.logger.log(
-      `Cobranza diaria: ${reminders} recordatorios y ${overdueNotices} avisos de mora enviados, ${loans.length} créditos revisados.`,
+      `Cobranza diaria [${TenantContext.company()?.slug ?? TenantContext.companyId()}]: ${reminders} recordatorios y ${overdueNotices} avisos de mora enviados, ${loans.length} créditos revisados.`,
     );
     return { checked: loans.length, reminders, overdueNotices, sent: reminders + overdueNotices };
   }

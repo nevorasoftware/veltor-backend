@@ -1,87 +1,95 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
-import { AmortizationMethod, DayCountBasis, UserRole } from '@prisma/client';
+import { UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
+import { CompaniesService } from '../companies/companies.service';
+
+/** Único superadministrador de la plataforma (contrato multiempresa) */
+export const PLATFORM_SUPERADMIN_EMAIL = 'softwarenevora@gmail.com';
 
 /**
- * Inicialización mínima al arrancar:
- *  - Garantiza un superadministrador (BOOTSTRAP_ADMIN_*) si no existe ningún usuario de personal.
- *  - Garantiza un producto financiero activo, parametrizado por variables de entorno.
- * No crea datos de demostración (vehículos, clientes, créditos ni prospectos).
+ * Inicialización mínima al arrancar (idempotente):
+ *  - Garantiza la empresa por defecto (y su producto financiero si la empresa no tiene ninguno).
+ *  - Garantiza el superadministrador de plataforma softwarenevora@gmail.com (companyId = null).
+ *    Cualquier otro SUPERADMIN pasa a ADMIN de la empresa por defecto.
+ * Los productos financieros de las demás empresas se crean al crear la empresa, no al arrancar.
+ * No crea datos de demostración. Todas las consultas son de plataforma: usan `prisma.unscoped`.
  */
 @Injectable()
 export class BootstrapService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BootstrapService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly companies: CompaniesService,
+  ) {}
 
   async onApplicationBootstrap() {
     try {
-      await this.ensureAdmin();
-      await this.ensureFinancingProduct();
+      const company = await this.companies.ensureDefaultCompany();
+      await this.companies.ensureProductFor(company.id);
+      await this.ensureSuperadmin(company.id);
     } catch (err: any) {
       this.logger.error(`No se pudo completar la inicialización: ${err?.message || err}`);
     }
+    this.warnEphemeralStorage();
   }
 
-  private async ensureAdmin() {
-    const staffCount = await this.prisma.user.count({ where: { role: { not: UserRole.CUSTOMER } } });
-    if (staffCount > 0) return;
+  private async ensureSuperadmin(defaultCompanyId: string) {
+    const db = this.prisma.unscoped;
 
-    // Sin correo configurado se usa uno por defecto; la contraseña siempre es aleatoria en ese caso
-    const email = (process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@veltor.app').toLowerCase().trim();
+    const demoted = await db.user.updateMany({
+      where: { role: UserRole.SUPERADMIN, email: { not: PLATFORM_SUPERADMIN_EMAIL } },
+      data: { role: UserRole.ADMIN },
+    });
+    if (demoted.count) this.logger.warn(`${demoted.count} superadministrador(es) adicional(es) pasaron a ADMIN.`);
+    await db.user.updateMany({
+      where: { companyId: null, email: { not: PLATFORM_SUPERADMIN_EMAIL } },
+      data: { companyId: defaultCompanyId },
+    });
 
-    let password = process.env.BOOTSTRAP_ADMIN_PASSWORD || '';
+    const existing = await db.user.findUnique({ where: { email: PLATFORM_SUPERADMIN_EMAIL } });
+    if (existing) {
+      if (existing.role !== UserRole.SUPERADMIN || existing.companyId !== null || !existing.isActive) {
+        await db.user.update({
+          where: { id: existing.id },
+          data: { role: UserRole.SUPERADMIN, companyId: null, isActive: true },
+        });
+        this.logger.warn(`${PLATFORM_SUPERADMIN_EMAIL} quedó como superadministrador de plataforma.`);
+      }
+      return;
+    }
+
+    let password = process.env.BOOTSTRAP_SUPERADMIN_PASSWORD || '';
     const generated = password.length < 10;
     if (generated) password = AuthService.generateTemporaryPassword();
 
-    await this.prisma.user.create({
+    await db.user.create({
       data: {
-        email,
-        fullName: process.env.BOOTSTRAP_ADMIN_NAME || 'Administrador',
+        email: PLATFORM_SUPERADMIN_EMAIL,
+        fullName: process.env.BOOTSTRAP_SUPERADMIN_NAME || 'Nevora Software',
         role: UserRole.SUPERADMIN,
+        companyId: null,
         passwordHash: await argon2.hash(password),
         isActive: true,
         mustChangePass: true,
       },
     });
 
-    this.logger.warn(`Superadministrador inicial creado: ${email}`);
+    this.logger.warn(`Superadministrador de plataforma creado: ${PLATFORM_SUPERADMIN_EMAIL}`);
     if (generated) {
       this.logger.warn(`Contraseña temporal generada (cámbiala al ingresar): ${password}`);
     }
   }
 
-  private async ensureFinancingProduct() {
-    const active = await this.prisma.financingProduct.count({ where: { isActive: true } });
-    if (active > 0) return;
-
-    const num = (name: string, fallback: number) => {
-      const v = Number(process.env[name]);
-      return Number.isFinite(v) && v > 0 ? v : fallback;
-    };
-    const defaultRate = num('PRODUCT_DEFAULT_MONTHLY_RATE', 0.015);
-
-    await this.prisma.financingProduct.upsert({
-      where: { code: 'PROD-AUTO-ESTANDAR' },
-      update: { isActive: true },
-      create: {
-        code: 'PROD-AUTO-ESTANDAR',
-        name: process.env.PRODUCT_FINANCING_NAME || 'Crédito Vehicular Estándar',
-        minMonthlyRate: num('PRODUCT_MIN_MONTHLY_RATE', Math.min(0.012, defaultRate)),
-        maxMonthlyRate: num('PRODUCT_MAX_MONTHLY_RATE', Math.max(0.022, defaultRate)),
-        defaultMonthlyRate: defaultRate,
-        minTermMonths: num('PRODUCT_MIN_TERM_MONTHS', 12),
-        maxTermMonths: num('PRODUCT_MAX_TERM_MONTHS', 72),
-        minDownPercent: num('PRODUCT_MIN_DOWN_PERCENT', 15),
-        dayCountBasis: DayCountBasis.D30_360,
-        method: AmortizationMethod.FRENCH,
-        graceDays: num('PRODUCT_GRACE_DAYS', 5),
-        lateRateMonthly: num('PRODUCT_LATE_MONTHLY_RATE', 0.03),
-        isActive: true,
-      },
-    });
-    this.logger.log('Producto financiero por defecto configurado.');
+  /** Sin Google Drive, los documentos y fotos van al disco del contenedor, que se pierde al redeplegar. */
+  private warnEphemeralStorage() {
+    if (process.env.NODE_ENV === 'production' && process.env.STORAGE_DRIVER !== 'gdrive') {
+      this.logger.error(
+        '¡ATENCIÓN! NODE_ENV=production sin STORAGE_DRIVER=gdrive: los documentos y fotos se guardan en el disco ' +
+          'efímero del contenedor y se PERDERÁN al reiniciar o redeplegar. Configure Google Drive.',
+      );
+    }
   }
 }

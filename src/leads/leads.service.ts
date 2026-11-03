@@ -316,6 +316,10 @@ export class LeadsService {
 
   async updateLead(id: string, dto: UpdateLeadDto) {
     await this.findOne(id);
+    // El vehículo debe ser de la misma empresa (la consulta ya está filtrada por empresa)
+    if (dto.vehicleId && !(await this.prisma.vehicle.count({ where: { id: dto.vehicleId } }))) {
+      throw new BadRequestException('El vehículo seleccionado no existe.');
+    }
 
     return this.prisma.lead.update({
       where: { id },

@@ -5,6 +5,7 @@ import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 import { Throttle } from '@nestjs/throttler';
 import { Roles } from './roles.decorator';
+import { SkipTenant } from '../tenant/skip-tenant.decorator';
 import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class LoginDto {
@@ -34,6 +35,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Public()
+  @SkipTenant()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
