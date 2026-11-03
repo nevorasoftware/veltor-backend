@@ -8,6 +8,8 @@ const CASES: [principal: number, months: number, monthlyRate: number, expected: 
   [7500, 48, 0.03, '296.83'],
   [8000, 48, 0.03, '316.62'],
   [16000, 48, 0.02, '521.63'],
+  // 40 % anual: la tasa mensual se guarda con 10 decimales (con 4 daría 360.51)
+  [8000, 41, 0.0333333333, '360.70'],
 ];
 
 const contract = (principal: number, months: number, rate: number, insurance: string | null): LoanContract => ({

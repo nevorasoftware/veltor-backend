@@ -527,16 +527,12 @@ export class LeadsService {
       );
     }
     // Tasa: anual nominal (36 % → 0.03 mensual) o mensual en decimal; si no, la del producto
-    const monthlyRate =
+    // Se guarda con 10 decimales (Decimal(12,10)): 40 % anual → 0.0333333333, cuota exacta al centavo
+    const monthlyRate = (
       dto.annualRate !== undefined
         ? new Decimal(dto.annualRate).div(1200)
-        : new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString());
-    // La tasa se guarda con 4 decimales (Decimal(6,4)); si no cabe exacta, las cuotas guardadas no cuadrarían
-    if (!monthlyRate.equals(monthlyRate.toDecimalPlaces(4))) {
-      throw new BadRequestException(
-        `La tasa mensual resultante (${monthlyRate.toString()}) tiene más de 4 decimales. Use una tasa anual múltiplo de 0.12 %.`,
-      );
-    }
+        : new Decimal(dto.monthlyRate ?? product.defaultMonthlyRate.toString())
+    ).toDecimalPlaces(10);
     const insurance = dto.insuranceMonthly && dto.insuranceMonthly > 0 ? new Decimal(dto.insuranceMonthly).toDecimalPlaces(2) : null;
 
     // Día de pago y mora: lo indicado al aperturar o, si no, los parámetros de cobranza
