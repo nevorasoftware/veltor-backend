@@ -11,6 +11,7 @@ import {
   PaymentFrequency,
   InstallmentStatus,
   LateFeeType,
+  PersonType,
 } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
 import {
@@ -37,6 +38,7 @@ import { generateSchedule, todayInTz, addMonths, firstDueDateForDay, fmt, isVali
 import { SettingsService } from '../settings/settings.service';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
 import { DomainEvents } from '../common/domain-events';
+import { vehicleName } from '../common/labels';
 import { ALLOWED_DOCUMENT_MIME_TYPES, DOCUMENTS_UPLOAD_DIR, MAX_DOCUMENT_BYTES } from '../documents/documents.constants';
 
 export class CreateLeadDto {
@@ -45,10 +47,12 @@ export class CreateLeadDto {
   @MaxLength(150)
   fullName!: string;
 
+  /** Obligatorio en el formulario público; opcional en carga inicial del personal (queda null) */
   @IsString()
   @IsNotEmpty()
   @MaxLength(30)
-  phone!: string;
+  @IsOptional()
+  phone?: string;
 
   /** Opcional: prospectos/clientes sin correo (no reciben correos; las copias van a los ADMIN) */
   @Transform(({ value }) => (typeof value === 'string' && value.trim() === '' ? undefined : value))
@@ -168,27 +172,49 @@ export class DocumentUploadInput {
   title?: string;
 }
 
+/**
+ * dui, nit, address, economicActivity y monthlyIncome son obligatorios salvo con initialLoad=true (carga parcial):
+ * ahí pueden faltar y quedan en null para que el admin los complete. La regla se valida en el servicio.
+ */
 export class ConvertLeadToLoanDto {
   @Matches(/^\d{8}-\d$/, { message: 'El DUI debe tener el formato 00000000-0' })
-  dui!: string;
+  @IsOptional()
+  dui?: string;
 
   @Matches(/^(\d{8}-\d|\d{4}-\d{6}-\d{3}-\d)$/, {
     message: 'El NIT debe tener el formato 00000000-0 o 0000-000000-000-0',
   })
-  nit!: string;
+  @IsOptional()
+  nit?: string;
 
   @IsString()
   @IsNotEmpty({ message: 'La dirección del cliente es obligatoria' })
-  address!: string;
+  @IsOptional()
+  address?: string;
 
   @IsString()
   @IsNotEmpty({ message: 'La actividad económica del cliente es obligatoria' })
-  economicActivity!: string;
+  @IsOptional()
+  economicActivity?: string;
 
   @Type(() => Number)
   @IsNumber()
   @Min(1, { message: 'El ingreso mensual debe ser mayor a cero' })
-  monthlyIncome!: number;
+  @IsOptional()
+  monthlyIncome?: number;
+
+  /** Persona natural (por defecto) o jurídica (p. ej. "Chacon Inversiones SA de CV") */
+  @IsEnum(PersonType)
+  @IsOptional()
+  personType?: PersonType;
+
+  /**
+   * Cliente existente al que se asigna el crédito (un cliente con varios créditos). Si se omite, se reutiliza
+   * el cliente con el mismo DUI o correo, o se crea uno nuevo.
+   */
+  @IsString()
+  @IsOptional()
+  customerId?: string;
 
   @IsString()
   @IsOptional()
@@ -321,8 +347,10 @@ export class LeadsService {
       throw new BadRequestException('Debe aceptar el aviso de privacidad y consentimiento para tratamiento de datos.');
     }
 
+    if (!silent && !dto.phone?.trim()) throw new BadRequestException('El teléfono es obligatorio.');
     if (dto.vehicleId) {
-      const exists = await this.prisma.vehicle.count({ where: { id: dto.vehicleId, isPublished: true } });
+      // En carga inicial el vehículo puede no estar publicado (ya está vendido)
+      const exists = await this.prisma.vehicle.count({ where: { id: dto.vehicleId, ...(silent ? {} : { isPublished: true }) } });
       if (!exists) throw new BadRequestException('El vehículo seleccionado no está disponible.');
     }
 
@@ -336,7 +364,7 @@ export class LeadsService {
         data: {
           code,
           fullName: dto.fullName.trim(),
-          phone: dto.phone.trim(),
+          phone: dto.phone?.trim() || null,
           email: dto.email ? dto.email.toLowerCase().trim() : null,
           message: dto.message,
           source: dto.source || LeadSource.CATALOG_REQUEST,
@@ -441,6 +469,17 @@ export class LeadsService {
     }
 
     const initialLoad = !!dto.initialLoad;
+    if (!initialLoad) {
+      const required: [keyof ConvertLeadToLoanDto, string][] = [
+        ['dui', 'DUI'],
+        ['nit', 'NIT'],
+        ['address', 'dirección'],
+        ['economicActivity', 'actividad económica'],
+        ['monthlyIncome', 'ingreso mensual'],
+      ];
+      const missing = required.filter(([k]) => dto[k] === undefined || dto[k] === null || dto[k] === '').map(([, l]) => l);
+      if (missing.length) throw new BadRequestException(`Faltan datos del cliente: ${missing.join(', ')}.`);
+    }
     const documents = this.validateDocuments(dto.documents ?? [], !initialLoad);
 
     // Vehículo: obligatorio y disponible (nunca se asigna uno arbitrario)
@@ -449,7 +488,7 @@ export class LeadsService {
     const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
     if (!vehicle) throw new BadRequestException('El vehículo seleccionado no existe.');
     if (vehicle.status !== VehicleStatus.AVAILABLE && vehicle.status !== VehicleStatus.RESERVED) {
-      throw new BadRequestException(`El vehículo ${vehicle.brand} ${vehicle.model} no está disponible para financiar.`);
+      throw new BadRequestException(`El vehículo ${vehicleName(vehicle)} no está disponible para financiar.`);
     }
 
     const product = await this.prisma.financingProduct.findFirst({
@@ -506,7 +545,13 @@ export class LeadsService {
     if (dto.disbursementDate && !isValidDate(dto.disbursementDate)) throw new BadRequestException('disbursementDate no es una fecha válida.');
     // Con primera cuota explícita, el día de pago sale de ella (los días 29-31 se manejan como fin de mes)
     const explicitDay = dto.firstPaymentDate ? Number(dto.firstPaymentDate.slice(8, 10)) : null;
-    const paymentDay = explicitDay !== null ? (explicitDay <= 28 ? explicitDay : null) : dto.paymentDay ?? collection.defaultPaymentDay ?? null;
+    // En carga inicial se respeta el día real (29-31: en meses cortos la cuota cae el último día del mes)
+    const paymentDay =
+      explicitDay !== null
+        ? explicitDay <= 28 || initialLoad
+          ? explicitDay
+          : null
+        : dto.paymentDay ?? collection.defaultPaymentDay ?? null;
     const lateFeeType = dto.lateFeeType ?? collection.defaultLateFeeType;
     const lateFeeAmount =
       lateFeeType === LateFeeType.NONE
@@ -560,21 +605,31 @@ export class LeadsService {
 
       const result = await withUniqueRetry(() =>
         this.prisma.$transaction(async (tx) => {
-          // Cliente: reutilizar si ya existe por DUI o correo (sin correo, solo por DUI)
-          let customer = await tx.customer.findFirst({
-            where: { OR: lead.email ? [{ dui: dto.dui }, { email: lead.email }] : [{ dui: dto.dui }] },
-          });
+          // Cliente: el indicado (customerId), o el que tenga el mismo DUI o correo, o uno nuevo.
+          // Solo se busca por los datos presentes: un { dui: undefined } dentro de OR coincidiría con todos.
+          let customer = null as Awaited<ReturnType<typeof tx.customer.findFirst>>;
+          if (dto.customerId) {
+            customer = await tx.customer.findUnique({ where: { id: dto.customerId } });
+            if (!customer) throw new BadRequestException('El cliente indicado (customerId) no existe en esta empresa.');
+          } else {
+            const match: { dui?: string; email?: string }[] = [];
+            if (dto.dui) match.push({ dui: dto.dui });
+            if (lead.email) match.push({ email: lead.email });
+            if (match.length) customer = await tx.customer.findFirst({ where: { OR: match } });
+          }
 
           if (customer) {
+            // Solo se completan los datos que vienen; nunca se borra lo existente
             customer = await tx.customer.update({
               where: { id: customer.id },
               data: {
                 status: CustomerStatus.ACTIVE,
-                dui: dto.dui,
-                nit: dto.nit,
-                address: dto.address,
-                economicActivity: dto.economicActivity,
-                monthlyIncome: dto.monthlyIncome,
+                dui: dto.dui ?? undefined,
+                nit: dto.nit ?? undefined,
+                address: dto.address ?? undefined,
+                economicActivity: dto.economicActivity ?? undefined,
+                monthlyIncome: dto.monthlyIncome ?? undefined,
+                personType: dto.personType ?? undefined,
               },
             });
           } else {
@@ -586,13 +641,14 @@ export class LeadsService {
               data: {
                 code: customerCode,
                 fullName: lead.fullName,
-                dui: dto.dui,
-                nit: dto.nit,
-                phone: lead.phone,
-                email: lead.email,
-                address: dto.address,
-                economicActivity: dto.economicActivity,
-                monthlyIncome: dto.monthlyIncome,
+                personType: dto.personType ?? PersonType.NATURAL,
+                dui: dto.dui ?? null,
+                nit: dto.nit ?? null,
+                phone: lead.phone ?? null,
+                email: lead.email ?? null,
+                address: dto.address ?? null,
+                economicActivity: dto.economicActivity ?? null,
+                monthlyIncome: dto.monthlyIncome ?? null,
                 status: CustomerStatus.ACTIVE,
                 internalNotes: `Cliente formalizado a partir del prospecto ${lead.code}`,
               },

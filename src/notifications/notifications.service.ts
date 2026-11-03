@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { LoanStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { DomainEvents } from '../common/domain-events';
+import { vehicleName } from '../common/labels';
 import { MailService, MailResult, OutgoingMail } from '../mail/mail.service';
 import { FinanceService } from '../finance/finance.service';
 import { PdfService } from '../pdf/pdf.service';
@@ -40,8 +41,8 @@ export function localHour(timeZone: string, now = new Date()): number {
   }
 }
 
-const vehicleLabel = (v?: { brand: string; model: string; year: number } | null) =>
-  v ? `${v.brand} ${v.model} ${v.year}` : null;
+const vehicleLabel = (v?: { brand: string | null; model: string | null; year: number | null } | null) =>
+  v ? vehicleName(v) : null;
 
 /** Saldo pendiente de una cuota (capital + interés + seguro + mora no pagados) */
 const amountDue = (i: InstallmentView) =>
@@ -85,7 +86,7 @@ export class NotificationsService implements OnModuleInit {
     // Carga inicial (silent): sin correos al cliente ni a administración
     this.events.on('lead.created', ({ leadId, silent }) => (silent ? undefined : this.notifyLeadCreated(leadId)));
     this.events.on('loan.activated', ({ loanId, silent }) => (silent ? undefined : this.notifyLoanActivated(loanId)));
-    this.events.on('payment.registered', ({ paymentId }) => this.notifyPaymentRegistered(paymentId));
+    this.events.on('payment.registered', ({ paymentId, silent }) => (silent ? undefined : this.notifyPaymentRegistered(paymentId)));
   }
 
   isConfigured() {

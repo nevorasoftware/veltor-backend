@@ -8,7 +8,8 @@ export interface DomainEventMap {
   'lead.created': { leadId: string; silent?: boolean };
   /** silent: carga inicial de un crédito ya en curso (no se envían correos; Drive sí se archiva) */
   'loan.activated': { loanId: string; silent?: boolean };
-  'payment.registered': { paymentId: string };
+  /** silent: pago histórico de carga inicial (sin correos) */
+  'payment.registered': { paymentId: string; silent?: boolean };
 }
 
 type EventName = keyof DomainEventMap;

@@ -4,6 +4,7 @@ import { VehicleStatus, Prisma } from '@prisma/client';
 import { CreateVehicleDto, UpdateVehicleDto, VehicleFilterDto, VehicleImageDto } from './vehicle.dto';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
 import { DRIVE_FOLDERS, GoogleDriveService } from '../storage/google-drive.service';
+import { vehicleName } from '../common/labels';
 
 const IMAGE_ORDER: Prisma.VehicleImageOrderByWithRelationInput[] = [{ isPrimary: 'desc' }, { sortOrder: 'asc' }];
 
@@ -11,7 +12,7 @@ const IMAGE_ORDER: Prisma.VehicleImageOrderByWithRelationInput[] = [{ isPrimary:
 const DRIVE_IMAGE_PATH = 'media/vehicle-images/';
 const DATA_URL_RE = /^data:(image\/[\w.+-]+);base64,(.+)$/s;
 
-type VehicleRef = { code: string; brand: string; model: string; year: number };
+type VehicleRef = { code: string; brand: string | null; model: string | null; year: number | null };
 type ImageRow = { url: string; caption?: string; driveFileId: string | null; isPrimary: boolean; sortOrder: number };
 
 @Injectable()
@@ -107,7 +108,7 @@ export class VehiclesService {
         try {
           const ext = data[1].split('/')[1].replace('jpeg', 'jpg');
           const file = await this.drive.upload(
-            [DRIVE_FOLDERS.vehicles, `${vehicle.code} - ${vehicle.brand} ${vehicle.model} ${vehicle.year}`],
+            [DRIVE_FOLDERS.vehicles, `${vehicle.code} - ${vehicleName(vehicle)}`],
             `${vehicle.code}_foto-${idx + 1}_${Date.now()}.${ext}`,
             data[1],
             Buffer.from(data[2], 'base64'),
@@ -139,7 +140,19 @@ export class VehiclesService {
 
   async create(dto: CreateVehicleDto) {
     this.validatePrices(dto.salePrice, dto.minDownPayment);
-    const { images, ...data } = dto;
+    const { images, initialLoad, ...data } = dto;
+    if (!initialLoad) {
+      const required: [keyof CreateVehicleDto, string][] = [
+        ['brand', 'marca'],
+        ['model', 'modelo'],
+        ['year', 'año'],
+        ['type', 'tipo'],
+        ['mileageKm', 'kilometraje'],
+        ['color', 'color'],
+      ];
+      const missing = required.filter(([k]) => dto[k] === undefined || dto[k] === null || dto[k] === '').map(([, l]) => l);
+      if (missing.length) throw new BadRequestException(`Faltan datos del vehículo: ${missing.join(', ')}.`);
+    }
 
     return withUniqueRetry(async () => {
       const code = await nextSequentialCode(
@@ -152,9 +165,17 @@ export class VehiclesService {
         data: {
           ...data,
           code,
+          brand: data.brand ?? null,
+          model: data.model ?? null,
+          year: data.year ?? null,
+          type: data.type ?? null,
+          mileageKm: data.mileageKm ?? null,
+          color: data.color ?? null,
           description: data.description ?? '',
           features: data.features ?? [],
           minDownPayment: data.minDownPayment ?? 0,
+          // Un vehículo de carga parcial ya está vendido/financiado: no se publica salvo que se pida
+          isPublished: data.isPublished ?? !initialLoad,
         },
       });
     }).then(async (vehicle) => {

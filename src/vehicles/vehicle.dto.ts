@@ -26,20 +26,27 @@ export class VehicleImageDto {
   caption?: string;
 }
 
+/**
+ * brand, model, year, type, mileageKm y color son obligatorios salvo con initialLoad=true (carga parcial de
+ * créditos en curso): ahí pueden faltar y quedan en null ("Por definir"); el servicio valida la regla.
+ */
 export class CreateVehicleDto {
   @IsString()
   @IsNotEmpty()
-  brand!: string;
+  @IsOptional()
+  brand?: string;
 
   @IsString()
   @IsNotEmpty()
-  model!: string;
+  @IsOptional()
+  model?: string;
 
   @Type(() => Number)
   @IsInt()
   @Min(1950)
   @Max(2100)
-  year!: number;
+  @IsOptional()
+  year?: number;
 
   @IsString()
   @IsOptional()
@@ -47,7 +54,8 @@ export class CreateVehicleDto {
 
   @IsString()
   @IsNotEmpty()
-  type!: string;
+  @IsOptional()
+  type?: string;
 
   @IsEnum(VehicleTransmission)
   @IsOptional()
@@ -66,11 +74,18 @@ export class CreateVehicleDto {
   @Type(() => Number)
   @IsInt()
   @Min(0)
-  mileageKm!: number;
+  @IsOptional()
+  mileageKm?: number;
 
   @IsString()
   @IsNotEmpty()
-  color!: string;
+  @IsOptional()
+  color?: string;
+
+  /** Carga parcial: permite datos faltantes (quedan en null) y por defecto no publica el vehículo en el catálogo */
+  @IsBoolean()
+  @IsOptional()
+  initialLoad?: boolean;
 
   @Type(() => Number)
   @IsInt()

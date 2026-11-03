@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { FinanceService } from '../finance/finance.service';
+import { orDash, vehicleName } from '../common/labels';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   PLATFORM_CREDIT,
@@ -123,8 +124,8 @@ export class PdfService {
       doc.font('Helvetica').fontSize(8).fillColor(colorGraphite);
       doc.text(`Cliente: ${loan.customer.fullName}`, 46, boxTop + 22);
       doc.text(`DUI: ${loan.customer.dui || 'N/A'}`, 46, boxTop + 34);
-      doc.text(`Teléfono: ${loan.customer.phone}`, 46, boxTop + 46);
-      doc.text(`Vehículo: ${loan.vehicle.brand} ${loan.vehicle.model} ${loan.vehicle.year}`, 46, boxTop + 58);
+      doc.text(`Teléfono: ${orDash(loan.customer.phone)}`, 46, boxTop + 46);
+      doc.text(`Vehículo: ${vehicleName(loan.vehicle)}`, 46, boxTop + 58);
 
       doc.text(`Monto Financiado: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 22);
       doc.text(`Tasa Mensual: ${(Number(loan.monthlyRate) * 100).toFixed(2)}%`, 310, boxTop + 34);
@@ -252,7 +253,7 @@ export class PdfService {
       doc.font('Helvetica').fontSize(8.5).fillColor(colorGraphite);
       doc.text(`Cliente: ${loan.customer.fullName}`, 46, boxTop + 24);
       doc.text(`DUI: ${loan.customer.dui || 'N/A'}`, 46, boxTop + 38);
-      doc.text(`Vehículo: ${loan.vehicle.brand} ${loan.vehicle.model} (${loan.vehicle.year})`, 46, boxTop + 52);
+      doc.text(`Vehículo: ${vehicleName(loan.vehicle)}`, 46, boxTop + 52);
       doc.text(`Estado del Crédito: ${loan.status}`, 46, boxTop + 66);
 
       const totalPaid = loan.payments.reduce((acc, p) => acc + Number(p.amountApplied), 0);

@@ -82,6 +82,28 @@ describe('Carga inicial de créditos en curso', () => {
     expect(Number(q.total)).toBeGreaterThan(0);
   });
 
+  it('pagos históricos en la fecha de vencimiento (cuota + seguro) no generan mora', () => {
+    const c = { ...contract(8000, 72, 0.03, '40.14'), startDate: '2025-05-07', firstDueDate: '2025-06-07' };
+    c.lateFee = { type: 'PER_DAY', amount: '5.00' };
+    const ledger = new LoanLedger(c);
+    const plan = ledger.snapshot('2025-05-07').current.installments;
+    for (let n = 0; n < 5; n++) {
+      const inst = plan[n];
+      const r = ledger.apply({ type: 'PAYMENT', id: `p${n}`, seq: n + 1, date: inst.dueDate, amount: inst.totalPayment, kind: 'INSTALLMENT' });
+      expect(r.allocations.some((a) => a.concept === 'LATE_INTEREST')).toBe(false);
+      expect(r.unapplied).toBe('0.00');
+    }
+    const snap = ledger.snapshot('2025-10-08');
+    expect(snap.current.installments.slice(0, 5).every((i) => i.status === 'PAID' && i.lateInterestAccrued === '0.00')).toBe(true);
+    expect(snap.totals.lateInterestPaid).toBe('0.00');
+  });
+
+  it('día de pago 30: en meses cortos la cuota cae el último día del mes', () => {
+    const c = { ...contract(5800, 30, 0.025, null), startDate: '2026-12-30', firstDueDate: '2027-01-30' };
+    const dues = new LoanLedger(c).snapshot('2026-12-30').current.installments.slice(0, 4).map((i) => i.dueDate);
+    expect(dues).toEqual(['2027-01-30', '2027-02-28', '2027-03-30', '2027-04-30']);
+  });
+
   it('sin seguro el contrato se comporta igual que antes', () => {
     const snap = LoanLedger.replay(contract(8000, 48, 0.03, null), [], '2026-06-10');
     expect(snap.current.installments[0].insurance).toBe('0.00');

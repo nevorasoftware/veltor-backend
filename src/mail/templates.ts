@@ -160,7 +160,7 @@ export function leadStaffAlertMail(p: {
   fullName: string;
   code: string;
   email: string | null;
-  phone: string;
+  phone: string | null;
   vehicle?: string | null;
   message?: string | null;
 }): RenderedMail {
@@ -168,7 +168,7 @@ export function leadStaffAlertMail(p: {
   const rows: Row[] = [
     ['Nombre', p.fullName],
     ['Correo', p.email || '(sin correo)'],
-    ['Teléfono', p.phone],
+    ['Teléfono', p.phone || '(sin teléfono)'],
   ];
   if (p.vehicle) rows.push(['Vehículo', p.vehicle]);
   const url = siteLink('/admin');

@@ -39,6 +39,11 @@ export class RegisterPaymentDto {
   @IsString()
   @IsNotEmpty()
   idempotencyKey!: string;
+
+  /** Carga de pagos históricos: no envía el correo de "pago registrado" (ni al cliente ni a los ADMIN) */
+  @IsBoolean()
+  @IsOptional()
+  initialLoad?: boolean;
 }
 
 export class LoanNotificationsDto {

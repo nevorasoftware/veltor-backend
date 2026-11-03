@@ -114,6 +114,8 @@ export class FinanceService {
     notes?: string;
     idempotencyKey: string;
     registeredById: string;
+    /** Pago histórico de carga inicial: sin correos */
+    initialLoad?: boolean;
   }) {
     // 1. Verificación de Idempotencia
     const existing = await this.prisma.paymentTransaction.findUnique({
@@ -234,7 +236,7 @@ export class FinanceService {
       }),
     );
 
-    this.events.emit('payment.registered', { paymentId: payment.id });
+    this.events.emit('payment.registered', { paymentId: payment.id, silent: !!dto.initialLoad });
 
     return {
       isDuplicate: false,
