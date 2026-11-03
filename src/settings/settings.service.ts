@@ -191,17 +191,21 @@ export class SettingsService {
     return { success: true, message: 'Parámetros de cobranza y mora actualizados.', ...(await this.getCollectionSettings()) };
   }
 
-  /** Correos del personal que reciben avisos (nuevo prospecto, crédito aprobado). Si no se han parametrizado, usa NOTIFY_STAFF_EMAILS. */
+  /**
+   * Correos del personal de ESTA empresa que reciben avisos (nuevo prospecto, crédito aprobado). Solo los
+   * parametrizados en la BD: nunca se usa una variable de entorno global, porque mezclaría empresas.
+   * Sin configurar, no hay lista de personal; los ADMIN activos reciben igual sus copias.
+   */
   async getStaffNotificationEmails(): Promise<string[]> {
     const setting = await this.prisma.systemSetting.findUnique({ where: settingKey(STAFF_EMAILS_KEY) });
-    return parseEmails(setting ? setting.value : process.env.NOTIFY_STAFF_EMAILS || '');
+    return parseEmails(setting?.value ?? '');
   }
 
   async getNotificationSettings() {
     const setting = await this.prisma.systemSetting.findUnique({ where: settingKey(STAFF_EMAILS_KEY) });
     return {
       staffEmails: await this.getStaffNotificationEmails(),
-      source: setting ? 'database' : 'environment',
+      source: setting ? 'database' : 'none',
       updatedAt: setting?.updatedAt ?? null,
     };
   }
