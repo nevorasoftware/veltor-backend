@@ -11,3 +11,8 @@ ALTER TABLE "loans" ADD COLUMN IF NOT EXISTS "insuranceMonthly" DECIMAL(12,2);
 ALTER TABLE "loans" ADD COLUMN IF NOT EXISTS "notificationsPaused" BOOLEAN NOT NULL DEFAULT false;
 
 ALTER TABLE "amortization_installments" ADD COLUMN IF NOT EXISTS "scheduledInsurance" DECIMAL(12,2) NOT NULL DEFAULT 0;
+
+-- Correo del cliente opcional (clientes reales cargados sin correo). La unicidad
+-- customers_companyId_email_key se mantiene: PostgreSQL permite varios NULL en un
+-- índice único, así que solo se exige cuando hay correo. La API debe guardar NULL, no ''.
+ALTER TABLE "customers" ALTER COLUMN "email" DROP NOT NULL;

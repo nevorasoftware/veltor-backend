@@ -322,7 +322,7 @@ model Customer {
   birthDate        DateTime?
   maritalStatus    MaritalStatus?
   phone            String
-  email            String
+  email            String? // Opcional: clientes cargados sin correo. Único por empresa solo cuando no es null
   address          String
   municipality     String?
   department       String?        @default("San Salvador")
