@@ -86,6 +86,26 @@ export class FinanceService {
     }
   }
 
+  /**
+   * Snapshots de todos los créditos ACTIVOS de la empresa a una fecha, con una sola consulta
+   * (reportes de cartera y mora). Usa el mismo motor que el estado de cuenta.
+   */
+  async activeLoanSnapshots(asOf: string) {
+    const loans = await this.prisma.loan.findMany({
+      where: { status: LoanStatus.ACTIVE },
+      include: {
+        customer: { select: { id: true, fullName: true } },
+        vehicle: { select: { id: true, brand: true, model: true, year: true } },
+        payments: { where: { isReversed: false }, orderBy: [{ effectiveDate: 'asc' }, { sequenceNumber: 'asc' }] },
+      },
+      orderBy: { code: 'asc' },
+    });
+    return loans.map((loan) => ({
+      loan,
+      snapshot: LoanLedger.replay(this.buildContract(loan), this.toEvents(loan.payments), asOf),
+    }));
+  }
+
   /** Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. */
   async getLoanLedgerSnapshot(loanId: string, asOfDate?: string, where: Prisma.LoanWhereInput = {}) {
     this.validateDate(asOfDate, 'La fecha de corte');

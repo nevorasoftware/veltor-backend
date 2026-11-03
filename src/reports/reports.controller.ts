@@ -14,6 +14,12 @@ export class ReportsController {
     return this.reportsService.getDashboardMetrics();
   }
 
+  @Get('delinquency')
+  @ApiOperation({ summary: 'Resumen de mora a hoy (zona horaria de la empresa): totales y detalle por crédito' })
+  async getDelinquency() {
+    return this.reportsService.getDelinquency();
+  }
+
   @Get('loans')
   @ApiOperation({ summary: 'Listar cartera de créditos para reportes' })
   async getLoans() {

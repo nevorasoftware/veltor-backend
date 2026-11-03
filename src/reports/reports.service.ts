@@ -2,10 +2,42 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { VehicleStatus, LoanStatus, LeadStatus, CustomerStatus } from '@prisma/client';
 import { todayInTz } from '../finance/engine';
+import { FinanceService } from '../finance/finance.service';
+import { TenantContext } from '../tenant/tenant-context';
+import { VEHICLE_TBD, vehicleName } from '../common/labels';
+import { DelinquentLoan, delinquencyTotals, summarizeOverdue } from './delinquency';
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly finance: FinanceService,
+  ) {}
+
+  /**
+   * Resumen de mora a la fecha de HOY en la zona horaria de la empresa, calculado con el ledger (incluye la mora
+   * devengada a hoy y el seguro vencido). inGrace marca los créditos vencidos que aún están dentro de la gracia.
+   */
+  async getDelinquency() {
+    const company = TenantContext.company();
+    const timezone = company?.timezone || 'America/El_Salvador';
+    const asOf = todayInTz(timezone);
+    const rows: DelinquentLoan[] = [];
+    for (const { loan, snapshot } of await this.finance.activeLoanSnapshots(asOf)) {
+      const summary = summarizeOverdue(snapshot.current.installments, loan.graceDays);
+      if (!summary) continue;
+      rows.push({
+        loanId: loan.id,
+        code: loan.code,
+        customerId: loan.customer.id,
+        customerName: loan.customer.fullName,
+        vehicleTitle: loan.vehicle.brand && loan.vehicle.model ? vehicleName(loan.vehicle) : VEHICLE_TBD,
+        ...summary,
+      });
+    }
+    rows.sort((a, b) => b.daysOverdue - a.daysOverdue || a.code.localeCompare(b.code));
+    return { asOf, timezone, currency: company?.currency || 'USD', totals: delinquencyTotals(rows), loans: rows };
+  }
 
   async getDashboardMetrics() {
     // Inicio del mes en la zona horaria del negocio (effectiveDate es una fecha sin hora)
