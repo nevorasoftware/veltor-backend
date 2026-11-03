@@ -1,14 +1,36 @@
 #!/bin/sh
 # Arranque de producción: aplica migraciones pendientes y luego inicia la API.
+# No siembra datos: solo `prisma migrate deploy` (nunca `db seed`, `db push` ni `migrate reset`).
 set -e
 
+# Migración que corre completa en una sola transacción: si falló, Postgres la
+# revirtió entera y es seguro marcarla como revertida y reintentarla una vez
+# (p. ej. tras un lock_timeout por una transacción larga de la versión anterior).
+TRANSACTIONAL_RETRY="20261103000000_multitenant"
+
+deploy() {
+  status=0
+  npx prisma migrate deploy > /tmp/migrate.log 2>&1 || status=$?
+  cat /tmp/migrate.log
+  return $status
+}
+
 echo "[start] Aplicando migraciones de base de datos..."
-if ! npx prisma migrate deploy; then
-  # P3005: la base ya tenía tablas (creada con `prisma db push`) pero sin historial de migraciones.
-  # Se marca la migración inicial como aplicada (línea base) y se reintenta.
-  echo "[start] Registrando la migración inicial como línea base y reintentando..."
-  npx prisma migrate resolve --applied 20261025000000_init
-  npx prisma migrate deploy
+if ! deploy; then
+  if grep -q "P3005" /tmp/migrate.log; then
+    # P3005: la base ya tenía tablas (creada con `prisma db push`) pero sin historial de migraciones.
+    # Se marca la migración inicial como aplicada (línea base) y se reintenta.
+    echo "[start] Registrando la migración inicial como línea base y reintentando..."
+    npx prisma migrate resolve --applied 20261025000000_init
+    deploy
+  elif grep -q "P3009" /tmp/migrate.log && grep -q "$TRANSACTIONAL_RETRY" /tmp/migrate.log; then
+    echo "[start] $TRANSACTIONAL_RETRY falló antes (transacción revertida). Se marca como revertida y se reintenta una vez..."
+    npx prisma migrate resolve --rolled-back "$TRANSACTIONAL_RETRY"
+    deploy
+  else
+    echo "[start] ERROR: las migraciones fallaron; la API no se inicia." >&2
+    exit 1
+  fi
 fi
 
 echo "[start] Iniciando VELTOR API..."

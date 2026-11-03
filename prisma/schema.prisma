@@ -228,7 +228,7 @@ model Company {
   locale            String    @default("es-SV")
   currency          String    @default("USD")
   timezone          String    @default("America/El_Salvador")
-  /// A lo sumo una empresa por defecto (índice único parcial en la migración)
+  /// A lo sumo una empresa por defecto (índice único parcial companies_single_default_key, creado en la migración)
   isDefault         Boolean   @default(false)
   isActive          Boolean   @default(true)
   createdAt         DateTime  @default(now())
@@ -271,7 +271,7 @@ model User {
   id                String    @id @default(uuid())
   /// Empresa a la que pertenece (null solo para el superadministrador de plataforma)
   companyId         String?
-  company           Company?  @relation(fields: [companyId], references: [id])
+  company           Company?  @relation(fields: [companyId], references: [id], onDelete: Restrict)
   email             String    @unique
   passwordHash      String
   fullName          String
@@ -883,7 +883,7 @@ model AuditLog {
   id            String   @id @default(uuid())
   /// Empresa a la que pertenece (null solo para el superadministrador de plataforma)
   companyId     String?
-  company       Company? @relation(fields: [companyId], references: [id])
+  company       Company? @relation(fields: [companyId], references: [id], onDelete: Restrict)
   userId        String?
   user          User?    @relation("UserAudits", fields: [userId], references: [id])
   action        String // LOGIN, CREATE_LOAN, APPLY_PAYMENT, REVERSE_PAYMENT
