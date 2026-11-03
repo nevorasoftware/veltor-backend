@@ -16,3 +16,7 @@ ALTER TABLE "amortization_installments" ADD COLUMN IF NOT EXISTS "scheduledInsur
 -- customers_companyId_email_key se mantiene: PostgreSQL permite varios NULL en un
 -- índice único, así que solo se exige cuando hay correo. La API debe guardar NULL, no ''.
 ALTER TABLE "customers" ALTER COLUMN "email" DROP NOT NULL;
+
+-- Correo del prospecto opcional: todo crédito se formaliza desde un prospecto,
+-- así que la carga de clientes sin correo lo requiere. leads.email no tiene unicidad.
+ALTER TABLE "leads" ALTER COLUMN "email" DROP NOT NULL;

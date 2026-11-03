@@ -473,7 +473,7 @@ model Lead {
   code             String // PROS-0001
   fullName         String
   phone            String
-  email            String
+  email            String? // Opcional: prospectos de clientes cargados sin correo
   message          String?    @db.Text
   source           LeadSource @default(CATALOG_REQUEST)
   status           LeadStatus @default(NEW)
