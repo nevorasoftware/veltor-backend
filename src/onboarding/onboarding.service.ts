@@ -3,6 +3,7 @@ import { CustomerStatus, LoanStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { DomainEvents } from '../common/domain-events';
 import { TenantContext } from '../tenant/tenant-context';
 import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import { frontendBaseUrl } from '../mail/templates';
@@ -42,6 +43,7 @@ export class OnboardingService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsappService,
+    private readonly events: DomainEvents,
   ) {}
 
   // ---------------------------------------------------------------- admin (con contexto de empresa)
@@ -224,6 +226,7 @@ export class OnboardingService {
         });
       });
       this.logger.log(`Registro completado: cliente ${c.code} (${company.slug})`);
+      this.events.emit('customer.registered', { customerId: c.id });
       return { success: true, email, message: 'Sus datos quedaron registrados. Ya puede ingresar al portal con su correo y contraseña.' };
     }, toCompanyInfo(company as any));
   }

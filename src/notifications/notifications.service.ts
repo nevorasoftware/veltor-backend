@@ -16,6 +16,7 @@ import {
   adminCopyMail,
   leadReceivedMail,
   leadStaffAlertMail,
+  customerRegisteredStaffMail,
   loanApprovedMail,
   loanApprovedStaffMail,
   paymentRegisteredMail,
@@ -87,6 +88,33 @@ export class NotificationsService implements OnModuleInit {
     this.events.on('lead.created', ({ leadId, silent }) => (silent ? undefined : this.notifyLeadCreated(leadId)));
     this.events.on('loan.activated', ({ loanId, silent }) => (silent ? undefined : this.notifyLoanActivated(loanId)));
     this.events.on('payment.registered', ({ paymentId, silent }) => (silent ? undefined : this.notifyPaymentRegistered(paymentId)));
+    this.events.on('customer.registered', ({ customerId }) => this.notifyCustomerRegistered(customerId));
+  }
+
+  /** Aviso a administración (ADMIN activos + lista de personal) cuando un cliente completa su registro por enlace. */
+  async notifyCustomerRegistered(customerId: string) {
+    const c = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+      select: {
+        id: true, code: true, fullName: true, dui: true, email: true, phone: true, address: true, municipality: true, department: true,
+        loans: { orderBy: { createdAt: 'desc' }, take: 1, select: { code: true } },
+      },
+    });
+    if (!c) return;
+    const admins = await this.prisma.user.findMany({ where: { role: UserRole.ADMIN, isActive: true }, select: { email: true } });
+    const recipients = [...new Set([...admins.map((a) => a.email), ...(await this.settings.getStaffNotificationEmails())].map((e) => e.toLowerCase()))];
+    const content = customerRegisteredStaffMail({
+      fullName: c.fullName,
+      code: c.code,
+      loanCode: c.loans[0]?.code ?? null,
+      dui: c.dui ?? '-',
+      email: c.email ?? '-',
+      phone: c.phone,
+      address: [c.address, c.municipality, c.department].filter(Boolean).join(', ') || '-',
+    });
+    for (const to of recipients) {
+      await this.mail.send({ to, template: 'customer.registered.staff', dedupeKey: `customer:${c.id}:registered:${to}`, ...content });
+    }
   }
 
   isConfigured() {

@@ -182,6 +182,33 @@ export function leadStaffAlertMail(p: {
   };
 }
 
+export function customerRegisteredStaffMail(p: {
+  fullName: string;
+  code: string;
+  loanCode: string | null;
+  dui: string;
+  email: string;
+  phone: string | null;
+  address: string;
+}): RenderedMail {
+  const title = `Cliente registrado: ${p.fullName}`;
+  const rows: Row[] = [
+    ['Cliente', `${p.fullName} (${p.code})`],
+    ['Crédito', p.loanCode || '-'],
+    ['DUI', p.dui],
+    ['Correo', p.email],
+    ['Teléfono', p.phone || '(sin teléfono)'],
+    ['Dirección', p.address],
+  ];
+  const url = siteLink('/admin');
+  const intro = 'El cliente completó sus datos con el enlace de registro y ya tiene acceso al portal de clientes.';
+  return {
+    subject: `${brand()}: cliente registrado ${p.code} — ${p.fullName}`,
+    html: layout(title, `<p style="color:#475569">${esc(intro)}</p>${rowsTable(rows)}${url ? button('Abrir panel', url) : ''}`),
+    text: textOf(title, [intro], rows),
+  };
+}
+
 export function loanApprovedMail(p: {
   fullName: string;
   loanCode: string;

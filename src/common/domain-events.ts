@@ -10,6 +10,8 @@ export interface DomainEventMap {
   'loan.activated': { loanId: string; silent?: boolean };
   /** silent: pago histórico de carga inicial (sin correos) */
   'payment.registered': { paymentId: string; silent?: boolean };
+  /** El cliente completó sus datos con el enlace de registro (se avisa a administración) */
+  'customer.registered': { customerId: string };
 }
 
 type EventName = keyof DomainEventMap;
