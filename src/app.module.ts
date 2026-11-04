@@ -22,6 +22,8 @@ import { PortalModule } from './portal/portal.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { CompaniesModule } from './companies/companies.module';
 import { StorageModule } from './storage/storage.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -42,6 +44,7 @@ import { HealthController } from './health/health.controller';
     DomainEventsModule,
     StorageModule,
     MailModule,
+    WhatsappModule,
     AuthModule,
     VehiclesModule,
     LeadsModule,
@@ -55,6 +58,7 @@ import { HealthController } from './health/health.controller';
     PortalModule,
     NotificationsModule,
     CompaniesModule,
+    OnboardingModule,
     BootstrapModule,
   ],
   controllers: [HealthController],

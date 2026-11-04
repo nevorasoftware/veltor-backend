@@ -260,6 +260,7 @@ model Company {
   auditLogs                AuditLog[]
   systemSettings           SystemSetting[]
   expenses                 Expense[]
+  customerInvites          CustomerInvite[]
 
   @@index([domains], type: Gin)
   @@map("companies")
@@ -338,6 +339,7 @@ model Customer {
   applications    FinancingApplication[]
   loans           Loan[]
   collectionCases CollectionCase[]
+  invites         CustomerInvite[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -885,6 +887,35 @@ model NotificationLog {
   @@index([loanId])
   @@index([companyId])
   @@map("notification_logs")
+}
+
+/// Invitación para que el cliente complete sus datos y cree su acceso al portal (enlace personal enviado por WhatsApp).
+/// En la BD solo se guarda el hash del token.
+model CustomerInvite {
+  id          String    @id @default(uuid())
+  /// Empresa propietaria. La extensión de Prisma lo inyecta; el default de BD es solo una red de seguridad.
+  companyId   String    @default(dbgenerated("current_setting('app.company_id'::text, true)"))
+  company     Company   @relation(fields: [companyId], references: [id])
+  customerId  String
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  revokedAt   DateTime?
+  /// WHATSAPP (enviado por la API) o LINK (el admin copió el enlace)
+  channel     String    @default("WHATSAPP")
+  sentTo      String?
+  /// SENT, FAILED, DISABLED, INVALID_PHONE, NOT_SENT
+  sendStatus  String    @default("NOT_SENT")
+  sendError   String?
+  messageId   String?
+  createdById String?
+
+  createdAt DateTime @default(now())
+
+  @@index([companyId])
+  @@index([customerId])
+  @@map("customer_invites")
 }
 
 model AuditLog {
