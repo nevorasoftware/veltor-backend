@@ -218,6 +218,127 @@ export class PdfService {
     });
   }
 
+  /**
+   * Comprobante de un pago: cuotas que cubrió con su desglose (capital, interés, seguro, mora), saldo de
+   * capital después del pago y siguiente cuota. `scope` restringe el crédito (portal del cliente).
+   */
+  async generatePaymentReceiptPdf(loanId: string, paymentId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
+    const { loan, payment, principalBalanceAfter, paidOff, next } = await this.financeService.getPaymentReceipt(loanId, paymentId, scope);
+    const logo = await loadRasterLogo(this.prisma.unscoped);
+    const CONCEPT: Record<string, string> = {
+      PRINCIPAL: 'Capital', INTEREST: 'Interés', ACCRUED_INTEREST: 'Interés devengado', INSURANCE: 'Seguro',
+      LATE_INTEREST: 'Mora', PREPAYMENT_PRINCIPAL: 'Abono a capital', SURPLUS: 'Saldo a favor',
+    };
+    const METHOD: Record<string, string> = {
+      CASH: 'Efectivo', BANK_TRANSFER: 'Transferencia', BANK_DEPOSIT: 'Depósito', CHECK: 'Cheque', OTHER: 'Otro',
+    };
+    const KIND: Record<string, string> = { INSTALLMENT: 'Pago de cuota', PRINCIPAL_PREPAYMENT: 'Abono extraordinario a capital', PAYOFF: 'Cancelación total' };
+    const effective = formatDate(new Date(`${payment.effectiveDate.toISOString().slice(0, 10)}T12:00:00Z`));
+
+    // Distribución agrupada por cuota (capital extra o saldo a favor van al final, sin número)
+    const groups = new Map<string, { label: string; rows: { concept: string; amount: number }[] }>();
+    for (const a of payment.allocations) {
+      const key = a.installmentNumber ? `c${String(a.installmentNumber).padStart(4, '0')}` : `z${a.concept}`;
+      const label = a.installmentNumber ? `Cuota ${a.installmentNumber}` : CONCEPT[a.concept] ?? a.concept;
+      const g = groups.get(key) ?? { label, rows: [] };
+      g.rows.push({ concept: CONCEPT[a.concept] ?? a.concept, amount: Number(a.amount) });
+      groups.set(key, g);
+    }
+    const ordered = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, g]) => g);
+    const covered = [...new Set(payment.allocations.map((a) => a.installmentNumber).filter((n): n is number => !!n))].sort((a, b) => a - b);
+
+    return new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ margin: 36, size: 'LETTER', bufferPages: true });
+      const buffers: Buffer[] = [];
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => resolve(Buffer.concat(buffers)));
+      doc.on('error', reject);
+
+      const primary = brandPrimary();
+      const graphite = '#1E293B';
+      const muted = '#64748B';
+      const border = '#CBD5E1';
+      const rowAlt = '#F8FAFC';
+
+      drawHeader(doc, logo, 'COMPROBANTE DE PAGO', [`No. ${payment.code}`, `Crédito: ${loan.code}`], muted, primary);
+
+      // Monto destacado
+      const top = 100;
+      doc.roundedRect(36, top, 540, 62, 6).fillAndStroke('#F0FDFA', '#99F6E4');
+      doc.font('Helvetica').fontSize(9).fillColor('#0F766E').text('MONTO RECIBIDO', 50, top + 12);
+      doc.font('Helvetica-Bold').fontSize(24).fillColor('#0F766E').text(formatMoney(payment.amountReceived), 50, top + 25);
+      doc.font('Helvetica').fontSize(9).fillColor(graphite);
+      doc.text(`Fecha de pago: ${effective}`, 320, top + 12, { width: 245, align: 'right' });
+      doc.text(KIND[payment.kind] ?? payment.kind, 320, top + 27, { width: 245, align: 'right' });
+      if (covered.length) {
+        const list = covered.length > 3 ? `${covered[0]} a ${covered[covered.length - 1]}` : covered.join(', ');
+        doc.text(`Cuota${covered.length > 1 ? 's' : ''} ${list}`, 320, top + 42, { width: 245, align: 'right' });
+      }
+
+      // Datos del cliente y del pago
+      const box = top + 76;
+      doc.rect(36, box, 540, 74).fillAndStroke(rowAlt, border);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(primary).text('CLIENTE', 46, box + 8).text('DETALLE DEL PAGO', 310, box + 8);
+      doc.font('Helvetica').fontSize(8.5).fillColor(graphite);
+      doc.text(`Nombre: ${loan.customer.fullName}`, 46, box + 24, { width: 255 });
+      doc.text(`DUI: ${orDash(loan.customer.dui)}`, 46, box + 38);
+      doc.text(`Vehículo: ${vehicleName(loan.vehicle)}`, 46, box + 52, { width: 255 });
+      doc.text(`Método: ${METHOD[payment.paymentMethod] ?? payment.paymentMethod}`, 310, box + 24);
+      doc.text(`Referencia: ${orDash(payment.referenceNumber)}`, 310, box + 38, { width: 260 });
+      doc.text(`Registrado: ${formatDate(payment.registeredAt)}`, 310, box + 52);
+
+      // Aplicación del pago
+      let y = box + 92;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(primary).text('APLICACIÓN DEL PAGO', 36, y);
+      y += 16;
+      doc.rect(36, y, 540, 20).fillAndStroke(primary, primary);
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('#FFFFFF');
+      doc.text('Cuota', 46, y + 6, { width: 150 });
+      doc.text('Concepto', 200, y + 6, { width: 200 });
+      doc.text('Monto', 450, y + 6, { width: 116, align: 'right' });
+      y += 20;
+      doc.font('Helvetica').fontSize(8.5);
+      let row = 0;
+      for (const g of ordered) {
+        g.rows.forEach((r, k) => {
+          if (y > FOOTER_TOP - 120) {
+            doc.addPage();
+            y = 50;
+          }
+          if (row++ % 2 === 1) doc.rect(36, y, 540, 17).fill(rowAlt);
+          doc.fillColor(graphite);
+          doc.font(k === 0 ? 'Helvetica-Bold' : 'Helvetica').text(k === 0 ? g.label : '', 46, y + 5, { width: 150 });
+          doc.font('Helvetica').text(r.concept, 200, y + 5, { width: 200 });
+          doc.text(formatMoney(r.amount), 450, y + 5, { width: 116, align: 'right' });
+          y += 17;
+        });
+      }
+      if (!payment.allocations.length) {
+        doc.fillColor(muted).text('Sin distribución registrada.', 46, y + 5);
+        y += 17;
+      }
+      doc.moveTo(36, y + 2).lineTo(576, y + 2).strokeColor(border).lineWidth(0.5).stroke();
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(graphite);
+      doc.text('Total aplicado', 200, y + 8, { width: 200 });
+      doc.text(formatMoney(payment.amountApplied), 450, y + 8, { width: 116, align: 'right' });
+      y += 32;
+
+      // Situación después del pago
+      doc.rect(36, y, 540, 46).fillAndStroke(rowAlt, border);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#0F766E').text(`Saldo de capital después de este pago: ${formatMoney(principalBalanceAfter)}`, 46, y + 10);
+      const nextText = paidOff
+        ? 'Con este pago el crédito quedó cancelado en su totalidad.'
+        : next
+        ? `Siguiente cuota: No. ${next.number}, vence el ${formatDate(new Date(`${next.dueDate}T12:00:00Z`))} por ${formatMoney(next.totalPayment)}.`
+        : '';
+      doc.font('Helvetica').fontSize(8.5).fillColor(graphite).text(nextText, 46, y + 26);
+
+      drawFooters(doc, `Comprobante emitido el ${formatDate()}. Este documento acredita el pago registrado en el sistema.`, border, muted);
+      doc.end();
+    });
+  }
+
+  /** `scope` restringe el crédito (p. ej. al cliente autenticado en el portal). */
   async generateAccountStatementPdf(loanId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
     const { loan: rawLoan, snapshot } = await this.financeService.getLoanLedgerSnapshot(loanId, undefined, scope);
     // Historial de pagos del más reciente al más antiguo

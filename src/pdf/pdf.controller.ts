@@ -35,6 +35,14 @@ export class PdfController {
     this.send(res, buffer, `Tabla-Amortizacion-${encodeURIComponent(id)}.pdf`);
   }
 
+  @Get(':id/payments/:paymentId/receipt.pdf')
+  @ApiOperation({ summary: 'Comprobante de un pago en PDF (cuotas cubiertas, desglose y saldo después del pago)' })
+  @ApiProduces('application/pdf')
+  async getPaymentReceiptPdf(@Param('id') id: string, @Param('paymentId') paymentId: string, @Request() req: any, @Res() res: Response) {
+    const buffer = await this.pdfService.generatePaymentReceiptPdf(id, paymentId, scopeFor(req.user));
+    this.send(res, buffer, `Comprobante-${encodeURIComponent(paymentId)}.pdf`);
+  }
+
   @Get(':id/statement.pdf')
   @ApiOperation({ summary: 'Generar y descargar Estado de Cuenta de crédito en formato PDF' })
   @ApiProduces('application/pdf')

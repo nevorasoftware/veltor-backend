@@ -115,6 +115,22 @@ export class FinanceService {
     return { loan, contract, snapshot };
   }
 
+  /**
+   * Datos del comprobante de un pago: el pago con su distribución, el saldo de capital que quedó justo
+   * después de ese pago y la siguiente cuota pendiente a esa fecha (replay del ledger hasta ese pago).
+   * `where` restringe el crédito (p. ej. al cliente del portal).
+   */
+  async getPaymentReceipt(loanId: string, paymentId: string, where: Prisma.LoanWhereInput = {}) {
+    const loan = await this.findLoan(loanId, where);
+    const idx = loan.payments.findIndex((p) => p.id === paymentId || (p as any).code === paymentId);
+    if (idx < 0) throw new NotFoundException('Pago no encontrado en este crédito (o fue anulado)');
+    const payment = loan.payments[idx];
+    const upTo = loan.payments.slice(0, idx + 1); // ya vienen ordenados por fecha y secuencia
+    const after = LoanLedger.replay(this.buildContract(loan), this.toEvents(upTo), toDateStr(payment.effectiveDate));
+    const next = after.current.installments.find((i) => i.status !== 'PAID') ?? null;
+    return { loan, payment, principalBalanceAfter: after.principalBalance, paidOff: after.status === 'PAID_OFF', next };
+  }
+
   /** Cotización exacta de liquidación total (Payoff Quote) */
   async getPayoffQuote(loanId: string, targetDate?: string, where: Prisma.LoanWhereInput = {}) {
     this.validateDate(targetDate, 'La fecha objetivo');

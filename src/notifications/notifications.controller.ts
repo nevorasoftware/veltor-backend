@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
-import { IsEmail, IsOptional } from 'class-validator';
+import { IsBoolean, IsEmail, IsOptional } from 'class-validator';
 import { Roles } from '../auth/roles.decorator';
 import { NotificationsService } from './notifications.service';
 
@@ -9,6 +9,16 @@ export class SendEmailDto {
   @IsEmail()
   @IsOptional()
   to?: string;
+}
+
+export class SendReceiptDto {
+  @IsBoolean()
+  @IsOptional()
+  email?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  whatsapp?: boolean;
 }
 
 export class TestEmailDto {
@@ -45,6 +55,15 @@ export class NotificationsController {
   async emailStatement(@Param('id') id: string, @Body() dto: SendEmailDto) {
     this.ensureConfigured();
     return this.ensureSent(await this.notifications.sendAccountStatement(id, dto.to));
+  }
+
+  @Post('finance/loans/:id/payments/:paymentId/receipt/send')
+  @Roles(UserRole.ADMIN, UserRole.CASHIER, UserRole.COLLECTIONS_AGENT, UserRole.APPROVAL_OFFICER)
+  @ApiOperation({ summary: 'Reenviar a demanda el comprobante de un pago (PDF) por correo y/o WhatsApp al cliente' })
+  async sendReceipt(@Param('id') id: string, @Param('paymentId') paymentId: string, @Body() dto: SendReceiptDto) {
+    const channels = { email: dto.email !== false, whatsapp: dto.whatsapp !== false };
+    if (!channels.email && !channels.whatsapp) throw new BadRequestException('Elija al menos un canal: correo o WhatsApp.');
+    return this.notifications.sendPaymentReceipt(id, paymentId, channels);
   }
 
   @Get('notifications/logs')

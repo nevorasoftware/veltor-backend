@@ -310,6 +310,53 @@ export class NotificationsService implements OnModuleInit {
     return { ...result, to: recipient };
   }
 
+  /**
+   * Reenvío a demanda del comprobante de un pago (PDF): por correo al cliente (adjunto) y/o por WhatsApp
+   * (plantilla comprobante_pago con el PDF como documento). Cada canal informa su resultado por separado.
+   */
+  async sendPaymentReceipt(loanId: string, paymentId: string, channels: { email: boolean; whatsapp: boolean }) {
+    const { loan, payment, principalBalanceAfter, paidOff, next } = await this.finance.getPaymentReceipt(loanId, paymentId);
+    const pdf = await this.pdf.generatePaymentReceiptPdf(loan.id, payment.id);
+    const filename = `Comprobante-${payment.code}.pdf`;
+    const out: { email?: MailResult & { to: string | null }; whatsapp?: { status: string; to: string | null; error?: string } } = {};
+
+    if (channels.email) {
+      const to = loan.customer.email || null;
+      const content = paymentRegisteredMail({
+        fullName: loan.customer.fullName,
+        loanCode: loan.code,
+        paymentCode: payment.code,
+        amount: payment.amountReceived.toString(),
+        effectiveDate: payment.effectiveDate.toISOString(),
+        principalBalance: principalBalanceAfter,
+        paidOff,
+        next: next ? { number: next.number, dueDate: next.dueDate, amount: next.totalPayment } : null,
+      });
+      const r = await this.mail.send({
+        to,
+        template: 'payment.receipt',
+        loanId: loan.id,
+        attachments: [{ filename, content: pdf, contentType: 'application/pdf' }],
+        ...content,
+        subject: `${TenantContext.company()?.name ?? 'Comprobante'}: comprobante de pago ${payment.code}`,
+      });
+      out.email = { ...r, to };
+    }
+
+    if (channels.whatsapp) {
+      const d = payment.effectiveDate.toISOString().slice(0, 10).split('-').reverse().join('/');
+      const r = await this.whatsapp.sendTemplate({
+        phone: loan.customer.phone,
+        template: 'comprobante_pago',
+        body: [loan.customer.fullName, TenantContext.company()?.name ?? '-', payment.code, Number(payment.amountReceived).toFixed(2), d, loan.code],
+        document: { data: pdf, filename },
+        loanId: loan.id,
+      });
+      out.whatsapp = { status: r.status, to: r.to, error: r.error };
+    }
+    return { paymentCode: payment.code, ...out };
+  }
+
   /** Últimos correos registrados (enviados o fallidos), para diagnóstico desde administración. */
   recentLogs(loanId?: string, take = 50) {
     return this.prisma.notificationLog.findMany({

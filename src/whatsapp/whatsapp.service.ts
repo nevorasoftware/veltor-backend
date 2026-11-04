@@ -32,6 +32,8 @@ export interface TemplateMessage {
   urlButtonParam?: string;
   /** Para el registro en notification_logs */
   loanId?: string;
+  /** Documento del encabezado (plantillas con encabezado DOCUMENT): se sube a Meta antes de enviar */
+  document?: { data: Buffer; filename: string; mime?: string };
 }
 
 /** Normaliza un teléfono a formato internacional sin "+". 8 dígitos se asumen de El Salvador (503). */
@@ -63,14 +65,38 @@ export class WhatsappService {
     let result: WhatsappResult;
     if (!to) result = { status: 'INVALID_PHONE', to: null, error: `Teléfono inválido: ${msg.phone ?? '(vacío)'}` };
     else if (!this.enabled()) result = { status: 'DISABLED', to, error: 'WhatsApp no está configurado (WHATSAPP_TOKEN / WHATSAPP_PHONE_ID)' };
-    else result = await this.post(to, msg);
+    else result = await this.post(to, msg).catch((e: any) => ({ status: 'FAILED' as const, to, error: String(e?.message ?? e) }));
 
     await this.log(msg, result);
     return result;
   }
 
+  /** Sube un archivo a WhatsApp y devuelve el id del medio (válido unos 30 días). */
+  private async uploadMedia(doc: { data: Buffer; filename: string; mime?: string }): Promise<string> {
+    const version = process.env.WHATSAPP_API_VERSION || 'v24.0';
+    const mime = doc.mime || 'application/pdf';
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mime);
+    form.append('file', new Blob([new Uint8Array(doc.data)], { type: mime }), doc.filename);
+    const res = await fetch(`https://graph.facebook.com/${version}/${process.env.WHATSAPP_PHONE_ID}/media`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body: any = await res.json().catch(() => null);
+    if (!res.ok || !body?.id) throw new Error(`No se pudo subir el documento: ${body?.error?.message ?? `HTTP ${res.status}`}`);
+    return body.id;
+  }
+
   private async post(to: string, msg: TemplateMessage): Promise<WhatsappResult> {
-    const components: any[] = [{ type: 'body', parameters: msg.body.map((v) => ({ type: 'text', text: cleanParam(v) })) }];
+    const components: any[] = [];
+    if (msg.document) {
+      const id = await this.uploadMedia(msg.document);
+      components.push({ type: 'header', parameters: [{ type: 'document', document: { id, filename: msg.document.filename } }] });
+    }
+    components.push({ type: 'body', parameters: msg.body.map((v) => ({ type: 'text', text: cleanParam(v) })) });
     if (msg.urlButtonParam !== undefined) {
       components.push({ type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: msg.urlButtonParam }] });
     }
