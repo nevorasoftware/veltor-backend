@@ -8,6 +8,7 @@ import { MailService, MailResult, OutgoingMail } from '../mail/mail.service';
 import { FinanceService } from '../finance/finance.service';
 import { PdfService } from '../pdf/pdf.service';
 import { SettingsService } from '../settings/settings.service';
+import { WhatsappService } from '../whatsapp/whatsapp.service';
 import { TenantContext } from '../tenant/tenant-context';
 import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import { InstallmentView, addDays, todayInTz, D, fmt } from '../finance/engine';
@@ -81,6 +82,7 @@ export class NotificationsService implements OnModuleInit {
     private readonly finance: FinanceService,
     private readonly pdf: PdfService,
     private readonly settings: SettingsService,
+    private readonly whatsapp: WhatsappService,
   ) {}
 
   onModuleInit() {
@@ -112,6 +114,7 @@ export class NotificationsService implements OnModuleInit {
       phone: c.phone,
       address: [c.address, c.municipality, c.department].filter(Boolean).join(', ') || '-',
     });
+    await this.notifyAdminWhatsapp('cliente registrado en el portal', `${c.fullName} (${c.code})`, `DUI ${c.dui ?? '-'} · ${c.email ?? 'sin correo'}`);
     for (const to of recipients) {
       await this.mail.send({ to, template: 'customer.registered.staff', dedupeKey: `customer:${c.id}:registered:${to}`, ...content });
     }
@@ -154,10 +157,29 @@ export class NotificationsService implements OnModuleInit {
     return result;
   }
 
+  /**
+   * Aviso por WhatsApp al administrador (plantilla aviso_admin) al número "WhatsApp de pagos" de la empresa;
+   * admite varios separados por coma. Nunca lanza: un fallo no afecta los correos ni la operación.
+   */
+  private async notifyAdminWhatsapp(event: string, client: string, detail: string, loanId?: string) {
+    try {
+      const companyId = TenantContext.companyId();
+      if (!companyId) return;
+      const company = await this.prisma.unscoped.company.findUnique({ where: { id: companyId }, select: { name: true, paymentsWhatsapp: true } });
+      const phones = (company?.paymentsWhatsapp ?? '').split(/[,;/]+/).map((p) => p.trim()).filter(Boolean);
+      for (const phone of phones) {
+        await this.whatsapp.sendTemplate({ phone, template: 'aviso_admin', body: [company!.name, event, client, detail], loanId });
+      }
+    } catch (err: any) {
+      this.logger.warn(`No se pudo enviar el aviso de WhatsApp a administración ("${event}"): ${err?.message || err}`);
+    }
+  }
+
   async notifyLeadCreated(leadId: string) {
     const lead = await this.prisma.lead.findUnique({ where: { id: leadId }, include: { vehicle: true } });
     if (!lead) return;
     const vehicle = vehicleLabel(lead.vehicle);
+    await this.notifyAdminWhatsapp(`nuevo prospecto ${lead.code}`, lead.fullName, [`Tel. ${lead.phone || 'sin teléfono'}`, vehicle].filter(Boolean).join(' · '));
 
     const staffForLead = await this.settings.getStaffNotificationEmails();
     await this.notifyCustomer(`Nuevo prospecto ${lead.code} de ${lead.fullName}`, {
@@ -204,6 +226,13 @@ export class NotificationsService implements OnModuleInit {
       firstDueDate: first?.dueDate ?? loan.firstDueDate.toISOString(),
     };
 
+    await this.notifyAdminWhatsapp(
+      `crédito activado ${loan.code}`,
+      loan.customer.fullName,
+      `${summary.vehicle} · financiado ${usd(summary.principal)} · cuota ${usd(String(summary.installment))}`,
+      loan.id,
+    );
+
     const staffForLoan = await this.settings.getStaffNotificationEmails();
     await this.notifyCustomer(`Se activó el crédito ${loan.code} de ${loan.customer.fullName}`, {
       to: loan.customer.email,
@@ -235,6 +264,13 @@ export class NotificationsService implements OnModuleInit {
     // Carga inicial: los pagos históricos no generan correos mientras los avisos estén pausados
     if (loan.notificationsPaused) return;
     const next = snapshot.current.installments.find(isOpen);
+    const d = payment.effectiveDate.toISOString().slice(0, 10).split('-').reverse().join('/');
+    await this.notifyAdminWhatsapp(
+      `pago recibido ${payment.code}`,
+      `${loan.customer.fullName} (${loan.code})`,
+      `${usd(payment.amountReceived.toString())} el ${d} · saldo de capital ${usd(String(snapshot.principalBalance))}`,
+      loan.id,
+    );
 
     await this.notifyCustomer(`Se registró el pago ${payment.code} de ${loan.customer.fullName} en el crédito ${loan.code}`, {
       to: loan.customer.email,
