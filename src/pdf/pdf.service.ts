@@ -6,6 +6,7 @@ import { orDash, vehicleName } from '../common/labels';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   PLATFORM_CREDIT,
+  PLATFORM_URL,
   brandLegalName,
   brandName,
   brandPrimary,
@@ -64,7 +65,7 @@ function drawFooters(doc: PDFKit.PDFDocument, note: string, colorBorder: string,
       .fillColor(colorMuted)
       .text(contacts, 36, 741, { width: 440, align: 'left', lineBreak: false })
       .text(note, 36, 752, { width: 540, align: 'left', lineBreak: false })
-      .text(PLATFORM_CREDIT, 36, 763, { width: 540, align: 'left', lineBreak: false })
+      .text(`${PLATFORM_CREDIT} · nevorasoftware.com`, 36, 763, { width: 540, align: 'left', lineBreak: false, link: PLATFORM_URL })
       .text(`Página ${i - range.start + 1} de ${range.count}`, 36, 741, { width: 540, align: 'right', lineBreak: false });
     doc.page.margins.bottom = bottomMargin;
   }

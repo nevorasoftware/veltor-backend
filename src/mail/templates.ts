@@ -7,6 +7,7 @@
 import { TenantContext } from '../tenant/tenant-context';
 import {
   PLATFORM_CREDIT,
+  PLATFORM_URL,
   brandHasRasterLogo,
   brandName,
   brandPrimary,
@@ -121,7 +122,7 @@ function layout(title: string, bodyHtml: string) {
     </td></tr>
     <tr><td style="padding:16px 24px;background:#F8FAFC;color:#94A3B8;font-size:11px;line-height:1.5">
       Este es un mensaje automático de ${esc(brand())}. ${esc(contactLine())}<br>
-      ${esc(PLATFORM_CREDIT)}
+      <a href="${PLATFORM_URL}" style="color:#94A3B8;text-decoration:underline">${esc(PLATFORM_CREDIT)}</a>
     </td></tr>
   </table>
 </td></tr>
@@ -131,7 +132,7 @@ function layout(title: string, bodyHtml: string) {
 
 function textOf(title: string, lines: string[], rows: Row[] = []) {
   const contacts = contactParts();
-  return [title, '', ...lines, '', ...rows.map(([l, v]) => `${l}: ${v}`), '', `— ${brand()}`, ...(contacts.length ? [contacts.join(' · ')] : []), PLATFORM_CREDIT].join('\n');
+  return [title, '', ...lines, '', ...rows.map(([l, v]) => `${l}: ${v}`), '', `— ${brand()}`, ...(contacts.length ? [contacts.join(' · ')] : []), `${PLATFORM_CREDIT} — ${PLATFORM_URL}`].join('\n');
 }
 
 function portalLink(): { html: string; text: string } {

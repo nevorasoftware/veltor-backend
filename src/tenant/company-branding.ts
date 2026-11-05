@@ -6,6 +6,8 @@ import { TenantContext } from './tenant-context';
  * leyenda fija es el crédito de la plataforma.
  */
 export const PLATFORM_CREDIT = 'Desarrollado por Nevora Software';
+/** Sitio web del desarrollador, enlazado en cada "Desarrollado por Nevora Software" */
+export const PLATFORM_URL = 'https://nevorasoftware.com/';
 
 /** Formatos de logo que se pueden incrustar en PDF (pdfkit) y en correos (Gmail/Outlook) */
 export const RASTER_LOGO_MIMES = ['image/png', 'image/jpeg'];
