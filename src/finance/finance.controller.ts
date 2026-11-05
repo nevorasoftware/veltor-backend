@@ -4,7 +4,45 @@ import { FinanceService } from './finance.service';
 import { PaymentKind, PaymentMethod, UserRole } from '@prisma/client';
 import { Roles } from '../auth/roles.decorator';
 import { PrepaymentPolicy } from './engine';
-import { IsBoolean, IsEnum, IsNotEmpty, IsNumberString, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsInt, IsNotEmpty, IsNumber, IsNumberString, IsOptional, IsString, Max, MaxLength, Min, ValidateIf } from 'class-validator';
+
+/** Rehacer crédito / actualizar condiciones. Lo que no se envía se conserva. */
+export class RestateLoanDto {
+  @IsString()
+  @IsNotEmpty({ message: 'Indique el motivo del cambio.' })
+  @MaxLength(1000)
+  reason!: string;
+
+  @IsOptional() @IsNumber() @Min(0.01)
+  vehiclePrice?: number;
+
+  @IsOptional() @IsNumber() @Min(0.01)
+  principal?: number;
+
+  @IsOptional() @IsNumber() @Min(0) @Max(200)
+  annualRate?: number;
+
+  @IsOptional() @IsInt() @Min(1) @Max(600)
+  termMonths?: number;
+
+  @IsOptional() @IsString()
+  firstPaymentDate?: string;
+
+  @IsOptional() @IsString()
+  disbursementDate?: string;
+
+  @IsOptional() @ValidateIf((_, v) => v !== null) @IsNumber() @Min(0)
+  insuranceMonthly?: number | null;
+
+  @IsOptional() @IsIn(['KEEP', 'REVERSE_ALL'])
+  payments?: 'KEEP' | 'REVERSE_ALL';
+
+  @IsOptional() @IsInt() @Min(0)
+  markPaidThrough?: number;
+
+  @IsOptional() @IsBoolean()
+  dryRun?: boolean;
+}
 
 export class RegisterPaymentDto {
   @IsString()
@@ -91,6 +129,13 @@ export class FinanceController {
   @Roles(UserRole.ADMIN)
   async setNotifications(@Param('id') id: string, @Body() dto: LoanNotificationsDto) {
     return this.financeService.setNotificationsPaused(id, dto.paused);
+  }
+
+  @Post('loans/:id/restate')
+  @ApiOperation({ summary: 'Rehacer crédito / actualizar condiciones (monto, tasa, plazo, fechas, seguro) y regenerar su plan; dryRun para previsualizar' })
+  @Roles(UserRole.ADMIN)
+  async restateLoan(@Param('id') id: string, @Body() dto: RestateLoanDto, @Request() req: any) {
+    return this.financeService.restateLoan(id, dto, req.user.id);
   }
 
   @Post('payments/:id/reverse')

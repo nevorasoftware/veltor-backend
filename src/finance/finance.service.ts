@@ -10,12 +10,35 @@ import {
   isValidDate,
   cmp,
   D,
+  addMonths,
+  generateSchedule,
 } from './engine';
-import { Loan, LoanStatus, PaymentKind, PaymentMethod, PaymentTransaction, Prisma } from '@prisma/client';
+import Decimal from 'decimal.js';
+import { InstallmentStatus, Loan, LoanStatus, PaymentKind, PaymentMethod, PaymentTransaction, Prisma } from '@prisma/client';
 import { nextSequentialCode, withUniqueRetry } from '../common/codes';
 import { DomainEvents } from '../common/domain-events';
 
 type LoanWithPayments = Loan & { payments: PaymentTransaction[] };
+
+/** Nuevas condiciones de un crédito ("rehacer crédito"). Lo que no se indica se conserva. */
+export interface RestateLoanInput {
+  reason: string;
+  vehiclePrice?: number;
+  /** Monto financiado; la prima pasa a ser precio − financiado */
+  principal?: number;
+  annualRate?: number;
+  termMonths?: number;
+  firstPaymentDate?: string;
+  /** Por defecto: un mes antes de la primera cuota */
+  disbursementDate?: string;
+  /** null o 0 = sin seguro */
+  insuranceMonthly?: number | null;
+  /** KEEP = los pagos vigentes se reaplican con las nuevas condiciones; REVERSE_ALL = se revierten todos */
+  payments?: 'KEEP' | 'REVERSE_ALL';
+  /** Tras rehacer: registra pagadas las cuotas 1..N en su fecha de vencimiento (pagos históricos, sin avisos) */
+  markPaidThrough?: number;
+  dryRun?: boolean;
+}
 
 @Injectable()
 export class FinanceService {
@@ -292,6 +315,242 @@ export class FinanceService {
       code: loan.code,
       notificationsPaused: paused,
       message: paused ? 'Avisos y correos del crédito pausados.' : 'Avisos y correos del crédito reanudados.',
+    };
+  }
+
+  /**
+   * Rehacer crédito / actualizar condiciones: cambia monto, tasa, plazo, fechas o seguro de un crédito activo,
+   * regenera su tabla de amortización y reconstruye saldos. Pensado para corregir créditos mal cargados.
+   * Los pagos se conservan (y se reaplican con las nuevas condiciones) o se revierten todos con historial;
+   * opcionalmente se registran pagadas las cuotas 1..N en su fecha (sin mora ni avisos).
+   * Queda en la bitácora (AuditLog RESTATE_LOAN) con el antes y el después.
+   */
+  async restateLoan(loanId: string, input: RestateLoanInput, userId: string) {
+    const loan = await this.findLoan(loanId);
+    if (loan.status !== LoanStatus.ACTIVE) {
+      throw new BadRequestException(`Solo se pueden rehacer créditos activos (${loan.code} está ${loan.status}).`);
+    }
+    const reason = input.reason?.trim();
+    if (!reason) throw new BadRequestException('Indique el motivo del cambio.');
+    this.validateDate(input.firstPaymentDate, 'La primera cuota');
+    this.validateDate(input.disbursementDate, 'La fecha de desembolso');
+
+    const vehiclePrice = new Decimal(input.vehiclePrice ?? loan.vehiclePrice.toString()).toDecimalPlaces(2);
+    const principal = new Decimal(
+      input.principal ??
+        (input.vehiclePrice !== undefined ? vehiclePrice.minus(loan.downPayment.toString()) : loan.originalPrincipal.toString()),
+    ).toDecimalPlaces(2);
+    if (principal.lte(0)) throw new BadRequestException('El monto financiado debe ser mayor a cero.');
+    const downPayment = vehiclePrice.minus(principal);
+    if (downPayment.lt(0)) throw new BadRequestException('El monto financiado no puede ser mayor al precio del vehículo.');
+    const monthlyRate = (
+      input.annualRate !== undefined ? new Decimal(input.annualRate).div(1200) : new Decimal(loan.monthlyRate.toString())
+    ).toDecimalPlaces(10);
+    const termCount = input.termMonths ?? loan.termCount;
+    if (!Number.isInteger(termCount) || termCount < 1 || termCount > 600) {
+      throw new BadRequestException('El plazo debe ser un número entero de meses.');
+    }
+    const firstDueDate = input.firstPaymentDate ?? toDateStr(loan.firstDueDate);
+    const disbursementDate =
+      input.disbursementDate ?? (input.firstPaymentDate ? addMonths(input.firstPaymentDate, -1) : toDateStr(loan.disbursementDate));
+    if (cmp(firstDueDate, disbursementDate) <= 0) {
+      throw new BadRequestException('La primera cuota debe ser posterior a la fecha de desembolso.');
+    }
+    const insurance =
+      input.insuranceMonthly === undefined
+        ? loan.insuranceMonthly
+          ? new Decimal(loan.insuranceMonthly.toString())
+          : null
+        : input.insuranceMonthly && input.insuranceMonthly > 0
+          ? new Decimal(input.insuranceMonthly).toDecimalPlaces(2)
+          : null;
+    const reverseAll = input.payments === 'REVERSE_ALL';
+    const kept = reverseAll ? [] : loan.payments;
+    if (kept.length && cmp(toDateStr(kept[0].effectiveDate), disbursementDate) < 0) {
+      throw new BadRequestException('Hay pagos anteriores al nuevo desembolso: para rehacer el crédito revierta todos los pagos.');
+    }
+
+    const updated = {
+      ...loan,
+      vehiclePrice: new Prisma.Decimal(vehiclePrice.toFixed(2)),
+      downPayment: new Prisma.Decimal(downPayment.toFixed(2)),
+      originalPrincipal: new Prisma.Decimal(principal.toFixed(2)),
+      monthlyRate: new Prisma.Decimal(monthlyRate.toString()),
+      termCount,
+      disbursementDate: new Date(disbursementDate),
+      firstDueDate: new Date(firstDueDate),
+      paymentDay: Number(firstDueDate.slice(8, 10)),
+      insuranceMonthly: insurance ? new Prisma.Decimal(insurance.toFixed(2)) : null,
+    } as LoanWithPayments;
+    const schedule = generateSchedule({
+      principal,
+      monthlyRate,
+      dayCount: loan.dayCount,
+      frequency: 'MONTHLY',
+      rounding: 'HALF_UP',
+      method: loan.method,
+      startDate: disbursementDate,
+      startNumber: 1,
+      anchorDate: firstDueDate,
+      anchorNumber: 1,
+      count: termCount,
+    });
+    const today = todayInTz();
+    const ledger = this.buildLedger(updated, kept);
+    const paidAfterKeep = ledger.snapshot(today).current.installments.filter((i) => i.status === 'PAID').length;
+
+    const markPaidThrough = input.markPaidThrough ?? 0;
+    if (!Number.isInteger(markPaidThrough) || markPaidThrough < 0 || markPaidThrough > termCount) {
+      throw new BadRequestException('Cuotas a marcar pagadas: número inválido.');
+    }
+    if (markPaidThrough && kept.length) {
+      throw new BadRequestException('Para registrar cuotas pagadas en su fecha, revierta primero todos los pagos.');
+    }
+    const toPay = schedule.installments.slice(0, markPaidThrough).map((i) => ({
+      number: i.number,
+      dueDate: i.dueDate,
+      amount: D(i.payment.toFixed(2)).plus(insurance ? insurance.toFixed(2) : '0').toFixed(2),
+    }));
+    const futureDue = toPay.find((p) => cmp(p.dueDate, today) > 0);
+    if (futureDue) {
+      throw new BadRequestException(`La cuota ${futureDue.number} vence el ${futureDue.dueDate}: solo se pueden marcar pagadas cuotas ya vencidas.`);
+    }
+
+    const terms = (l: Loan) => ({
+      vehiclePrice: Number(l.vehiclePrice),
+      downPayment: Number(l.downPayment),
+      principal: Number(l.originalPrincipal),
+      annualRate: new Decimal(l.monthlyRate.toString()).times(1200).toDecimalPlaces(4).toNumber(),
+      termMonths: l.termCount,
+      disbursementDate: toDateStr(l.disbursementDate),
+      firstPaymentDate: toDateStr(l.firstDueDate),
+      insuranceMonthly: l.insuranceMonthly ? Number(l.insuranceMonthly) : null,
+    });
+    const before = {
+      ...terms(loan),
+      installment: Number(this.buildLedger(loan, []).snapshot(today).current.installments[0]?.payment ?? 0),
+      activePayments: loan.payments.length,
+      principalBalance: Number(loan.currentPrincipalBalance),
+    };
+    const after = {
+      ...terms(updated),
+      installment: Number(schedule.installments[0]?.payment.toFixed(2) ?? 0),
+      lastDueDate: schedule.installments.at(-1)?.dueDate ?? null,
+    };
+    const preview = {
+      loan: { id: loan.id, code: loan.code },
+      reason,
+      before,
+      after,
+      paymentsToReverse: reverseAll
+        ? loan.payments.map((p) => ({ id: p.id, code: p.code, date: toDateStr(p.effectiveDate), amount: Number(p.amountReceived) }))
+        : [],
+      paymentsKept: kept.length,
+      paidInstallmentsWithKeptPayments: paidAfterKeep,
+      paymentsToRegister: toPay,
+    };
+    if (input.dryRun) return { dryRun: true, ...preview };
+
+    const audit = await this.prisma.$transaction(async (tx) => {
+      if (reverseAll && loan.payments.length) {
+        const ids = loan.payments.map((p) => p.id);
+        await tx.paymentTransaction.updateMany({ where: { id: { in: ids } }, data: { isReversed: true } });
+        await tx.paymentReversal.createMany({
+          data: ids.map((paymentId) => ({
+            paymentId,
+            reversalDate: new Date(today),
+            reason: `Rehacer crédito ${loan.code}: ${reason}`,
+            authorizedById: userId,
+          })),
+        });
+      }
+      await tx.loan.update({
+        where: { id: loan.id },
+        data: {
+          vehiclePrice: updated.vehiclePrice,
+          downPayment: updated.downPayment,
+          originalPrincipal: updated.originalPrincipal,
+          monthlyRate: updated.monthlyRate,
+          termCount,
+          disbursementDate: updated.disbursementDate,
+          firstDueDate: updated.firstDueDate,
+          paymentDay: updated.paymentDay,
+          insuranceMonthly: updated.insuranceMonthly,
+          currentPrincipalBalance: ledger.balance,
+          status: D(ledger.balance).isZero() ? LoanStatus.PAID_OFF : LoanStatus.ACTIVE,
+        },
+      });
+      await tx.amortizationInstallment.deleteMany({ where: { loanId: loan.id } });
+      await tx.loanContractVersion.deleteMany({ where: { loanId: loan.id } });
+      await tx.loanContractVersion.create({
+        data: {
+          loanId: loan.id,
+          versionIndex: 0,
+          reason: 'ORIGINAL',
+          effectiveDate: updated.disbursementDate,
+          principalBalance: principal.toFixed(2),
+          monthlyRate: monthlyRate.toString(),
+          levelPayment: schedule.installments[0]?.payment.toFixed(2) ?? null,
+        },
+      });
+      await tx.amortizationInstallment.createMany({
+        data: schedule.installments.map((inst) => ({
+          loanId: loan.id,
+          versionIndex: 0,
+          number: inst.number,
+          dueDate: new Date(inst.dueDate),
+          periodStart: new Date(inst.periodStart),
+          openingBalance: inst.openingBalance.toFixed(2),
+          scheduledPrincipal: inst.principal.toFixed(2),
+          scheduledInterest: inst.interest.toFixed(2),
+          scheduledPayment: inst.payment.toFixed(2),
+          closingBalance: inst.closingBalance.toFixed(2),
+          scheduledInsurance: insurance ? insurance.toFixed(2) : '0',
+          status: InstallmentStatus.PENDING,
+        })),
+      });
+      return tx.auditLog.create({
+        data: {
+          userId,
+          action: 'RESTATE_LOAN',
+          entityName: 'Loan',
+          entityId: loan.id,
+          payloadBefore: before as Prisma.InputJsonValue,
+          payloadAfter: { ...after, reason, reversedPayments: preview.paymentsToReverse.length, markPaidThrough } as Prisma.InputJsonValue,
+        },
+      });
+    });
+
+    // Cuotas históricas en su fecha: mismo camino que un pago normal, sin correos ni WhatsApp
+    const registered: string[] = [];
+    for (const p of toPay) {
+      const r = await this.registerPayment({
+        loanId: loan.id,
+        amount: p.amount,
+        effectiveDate: p.dueDate,
+        kind: 'INSTALLMENT',
+        paymentMethod: 'OTHER',
+        referenceNumber: 'Rehacer crédito',
+        notes: `Cuota ${p.number} registrada en su fecha al rehacer el crédito: ${reason}`,
+        idempotencyKey: `restate-${audit.id}-c${p.number}`,
+        registeredById: userId,
+        initialLoad: true,
+      });
+      registered.push(r.payment.code);
+    }
+
+    const final = await this.getLoanLedgerSnapshot(loan.id);
+    const inst = final.snapshot.current.installments;
+    return {
+      success: true,
+      ...preview,
+      registeredPayments: registered,
+      result: {
+        principalBalance: final.snapshot.principalBalance,
+        paidInstallments: inst.filter((i) => i.status === 'PAID').length,
+        next: inst.find((i) => i.status !== 'PAID') ?? null,
+      },
+      message: `Crédito ${loan.code} actualizado con las nuevas condiciones.`,
     };
   }
 
