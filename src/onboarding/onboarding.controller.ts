@@ -1,11 +1,13 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Request } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Request, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { UserRole } from '@prisma/client';
 import { Public } from '../auth/public.decorator';
 import { Roles } from '../auth/roles.decorator';
 import { SkipTenant } from '../tenant/skip-tenant.decorator';
-import { BulkInviteDto, CompleteRegistrationDto, SendInviteDto } from './onboarding.dto';
+import { MAX_DOCUMENT_BYTES } from '../documents/documents.constants';
+import { BulkInviteDto, CompleteRegistrationDto, REGISTRATION_FILES, RegistrationFiles, SendInviteDto } from './onboarding.dto';
 import { OnboardingService } from './onboarding.service';
 
 @ApiTags('Registro de clientes')
@@ -56,8 +58,14 @@ export class PublicRegistrationController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post(':token')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Completar los datos del cliente y crear su acceso al portal' })
-  complete(@Param('token') token: string, @Body() dto: CompleteRegistrationDto) {
-    return this.onboarding.complete(token, dto);
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(
+    FileFieldsInterceptor(REGISTRATION_FILES.map((f) => ({ name: f.field, maxCount: 1 })), {
+      limits: { fileSize: MAX_DOCUMENT_BYTES, files: REGISTRATION_FILES.length },
+    }),
+  )
+  @ApiOperation({ summary: 'Completar los datos del cliente (con fotos del DUI y la licencia) y crear su acceso al portal' })
+  complete(@Param('token') token: string, @Body() dto: CompleteRegistrationDto, @UploadedFiles() files?: RegistrationFiles) {
+    return this.onboarding.complete(token, dto, files ?? {});
   }
 }

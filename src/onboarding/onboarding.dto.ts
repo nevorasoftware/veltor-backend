@@ -61,10 +61,20 @@ export class CompleteRegistrationDto {
   @MaxLength(128)
   password!: string;
 
+  // Llega como texto en multipart/form-data
+  @Transform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   @Equals(true, { message: 'Debe aceptar el aviso de privacidad para continuar.' })
   privacyAccepted!: boolean;
 }
+
+/** Fotos obligatorias del registro: campo multipart → categoría del expediente */
+export const REGISTRATION_FILES = [
+  { field: 'duiFront', category: 'DUI_FRONT', title: 'DUI (frente)' },
+  { field: 'duiBack', category: 'DUI_BACK', title: 'DUI (reverso)' },
+  { field: 'license', category: 'DRIVER_LICENSE', title: 'Licencia de conducir' },
+] as const;
+export type RegistrationFiles = Partial<Record<(typeof REGISTRATION_FILES)[number]['field'], Express.Multer.File[]>>;
 
 export class SendInviteDto {
   /** false = solo generar el enlace para copiarlo (no envía WhatsApp) */

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { CustomerStatus, LoanStatus, UserRole } from '@prisma/client';
+import { CustomerStatus, DocumentCategory, LoanStatus, UserRole } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,7 +8,9 @@ import { TenantContext } from '../tenant/tenant-context';
 import { toCompanyInfo } from '../tenant/tenant-resolver.service';
 import { frontendBaseUrl } from '../mail/templates';
 import { WhatsappService, normalizeWhatsappPhone } from '../whatsapp/whatsapp.service';
-import { CompleteRegistrationDto } from './onboarding.dto';
+import { DocumentsService } from '../documents/documents.service';
+import { ALLOWED_DOCUMENT_MIME_TYPES } from '../documents/documents.constants';
+import { CompleteRegistrationDto, REGISTRATION_FILES, RegistrationFiles } from './onboarding.dto';
 
 /** Vigencia del enlace de registro (el texto de la plantilla de WhatsApp dice 7 días) */
 export const INVITE_TTL_DAYS = 7;
@@ -44,6 +46,7 @@ export class OnboardingService {
     private readonly prisma: PrismaService,
     private readonly whatsapp: WhatsappService,
     private readonly events: DomainEvents,
+    private readonly documents: DocumentsService,
   ) {}
 
   // ---------------------------------------------------------------- admin (con contexto de empresa)
@@ -54,6 +57,7 @@ export class OnboardingService {
       select: {
         id: true, code: true, fullName: true, phone: true, email: true, dui: true, address: true,
         user: { select: { id: true } },
+        documents: { where: { category: { in: [DocumentCategory.DUI_FRONT, DocumentCategory.DUI_BACK, DocumentCategory.DRIVER_LICENSE] } }, select: { category: true } },
         invites: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true, expiresAt: true, usedAt: true, revokedAt: true, sendStatus: true, sendError: true } },
       },
       orderBy: { code: 'asc' },
@@ -63,7 +67,8 @@ export class OnboardingService {
       return {
         id: c.id, code: c.code, fullName: c.fullName, phone: c.phone,
         hasPortalAccess: !!c.user,
-        missing: [!c.dui && 'DUI', !c.email && 'correo', !c.address && 'dirección'].filter(Boolean),
+        missing: [!c.dui && 'DUI', !c.email && 'correo', !c.address && 'dirección',
+          ...REGISTRATION_FILES.filter((f) => !c.documents.some((d) => d.category === f.category)).map((f) => `foto ${f.title}`)].filter(Boolean),
         validPhone: !!normalizeWhatsappPhone(c.phone),
         lastInvite: last && {
           sentAt: last.createdAt, expiresAt: last.expiresAt, sendStatus: last.sendStatus, sendError: last.sendError,
@@ -179,9 +184,15 @@ export class OnboardingService {
     };
   }
 
-  async complete(token: string, dto: CompleteRegistrationDto) {
+  async complete(token: string, dto: CompleteRegistrationDto, files: RegistrationFiles = {}) {
     const { inv, company } = await this.resolve(token);
     if (!dto.privacyAccepted) throw new BadRequestException('Debe aceptar el aviso de privacidad para continuar.');
+    // DUI (frente y reverso) y licencia de conducir son obligatorios para registrarse
+    const docs = REGISTRATION_FILES.map((f) => ({ ...f, file: files[f.field]?.[0] }));
+    const missing = docs.filter((d) => !d.file?.size).map((d) => d.title);
+    if (missing.length) throw new BadRequestException(`Adjunte la foto de: ${missing.join(', ')}.`);
+    const badType = docs.find((d) => !ALLOWED_DOCUMENT_MIME_TYPES.includes(d.file!.mimetype));
+    if (badType) throw new BadRequestException(`${badType.title}: use una foto JPG, PNG o WEBP, o un PDF.`);
     const email = dto.email.toLowerCase().trim();
 
     return TenantContext.run(company.id, async () => {
@@ -196,6 +207,14 @@ export class OnboardingService {
         throw new ConflictException('Ese correo ya está registrado con otro cliente. Use otro correo.');
       if (await this.prisma.unscoped.user.findUnique({ where: { email }, select: { id: true } }))
         throw new ConflictException('Ese correo ya tiene una cuenta. Use otro correo o inicie sesión.');
+
+      // Fotos al expediente antes de crear el acceso: si falla la subida, el enlace sigue vigente y puede reintentar
+      for (const d of docs) {
+        await this.documents.uploadCustomerDocument(
+          { customerId: c.id, category: d.category as DocumentCategory, title: d.title, notes: 'Subido por el cliente con el enlace de registro.' },
+          d.file!,
+        );
+      }
 
       const passwordHash = await argon2.hash(dto.password);
       const now = new Date();
