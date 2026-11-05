@@ -300,6 +300,7 @@ export class CompaniesService {
           ['creditEvaluations', () => tx.creditEvaluation.deleteMany(where)],
           ['creditApprovals', () => tx.creditApproval.deleteMany(where)],
           ['financingApplications', () => tx.financingApplication.deleteMany(where)],
+          ['whatsappMessages', () => tx.whatsappMessage.deleteMany(where)],
           ['customerDocuments', () => tx.customerDocument.deleteMany(where)],
           ['leads', () => tx.lead.deleteMany(where)],
           ['vehicleStatusHistory', () => tx.vehicleStatusHistory.deleteMany(where)],

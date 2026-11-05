@@ -12,6 +12,8 @@ export interface DomainEventMap {
   'payment.registered': { paymentId: string; silent?: boolean };
   /** El cliente completó sus datos con el enlace de registro (se avisa a administración) */
   'customer.registered': { customerId: string };
+  /** Un cliente escribió al WhatsApp de la plataforma (primer mensaje tras un rato de silencio) */
+  'whatsapp.received': { messageId: string };
 }
 
 type EventName = keyof DomainEventMap;

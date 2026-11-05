@@ -24,6 +24,7 @@ import { CompaniesModule } from './companies/companies.module';
 import { StorageModule } from './storage/storage.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
+import { WhatsappInboxModule } from './whatsapp-inbox/whatsapp-inbox.module';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -59,6 +60,7 @@ import { HealthController } from './health/health.controller';
     NotificationsModule,
     CompaniesModule,
     OnboardingModule,
+    WhatsappInboxModule,
     BootstrapModule,
   ],
   controllers: [HealthController],

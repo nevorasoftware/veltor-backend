@@ -210,6 +210,23 @@ export function customerRegisteredStaffMail(p: {
   };
 }
 
+export function whatsappReceivedStaffMail(p: { who: string; phone: string; preview: string; at: string }): RenderedMail {
+  const title = `Mensaje de WhatsApp de ${p.who}`;
+  const rows: Row[] = [
+    ['De', p.who],
+    ['Teléfono', p.phone],
+    ['Mensaje', p.preview],
+    ['Recibido', p.at],
+  ];
+  const url = siteLink('/admin');
+  const intro = 'Un cliente escribió al WhatsApp. Puede leer la conversación y responderle desde la pestaña "Mensajes" del panel (dentro de las 24 horas siguientes a su último mensaje).';
+  return {
+    subject: `${brand()}: WhatsApp de ${p.who}`,
+    html: layout(title, `<p style="color:#475569">${esc(intro)}</p>${rowsTable(rows)}${url ? button('Abrir mensajes', url) : ''}`),
+    text: textOf(title, [intro], rows),
+  };
+}
+
 export function loanApprovedMail(p: {
   fullName: string;
   loanCode: string;

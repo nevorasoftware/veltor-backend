@@ -68,7 +68,75 @@ export class WhatsappService {
     else result = await this.post(to, msg).catch((e: any) => ({ status: 'FAILED' as const, to, error: String(e?.message ?? e) }));
 
     await this.log(msg, result);
+    if (result.status === 'SENT') await this.recordOutgoing(result.to!, 'template', `[Plantilla ${msg.template}] ${msg.body.map((v) => cleanParam(v)).join(' · ')}`, result.messageId);
     return result;
+  }
+
+  /**
+   * Texto libre a un número (respuestas de la bandeja). WhatsApp solo lo permite dentro de las 24 horas
+   * siguientes al último mensaje del cliente; fuera de esa ventana hay que usar una plantilla aprobada.
+   */
+  async sendText(phone: string, text: string): Promise<WhatsappResult> {
+    const to = normalizeWhatsappPhone(phone);
+    if (!to) return { status: 'INVALID_PHONE', to: null, error: `Teléfono inválido: ${phone}` };
+    if (!this.enabled()) return { status: 'DISABLED', to, error: 'WhatsApp no está configurado (WHATSAPP_TOKEN / WHATSAPP_PHONE_ID)' };
+    try {
+      const res = await fetch(`https://graph.facebook.com/${this.version()}/${process.env.WHATSAPP_PHONE_ID}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { body: text, preview_url: true } }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const body: any = await res.json().catch(() => null);
+      if (res.ok && body?.messages?.[0]?.id) return { status: 'SENT', to, messageId: body.messages[0].id };
+      const error = body?.error ? `(#${body.error.code}) ${body.error.message}${body.error.error_data?.details ? ` — ${body.error.error_data.details}` : ''}` : `HTTP ${res.status}`;
+      this.logger.warn(`WhatsApp texto a ${to} falló: ${error}`);
+      return { status: 'FAILED', to, error };
+    } catch (e: any) {
+      return { status: 'FAILED', to, error: String(e?.message ?? e) };
+    }
+  }
+
+  /** Descarga un adjunto recibido (id de medio de Meta, disponible unos 30 días). */
+  async downloadMedia(mediaId: string): Promise<{ data: Buffer; mime: string }> {
+    if (!this.enabled()) throw new Error('WhatsApp no está configurado');
+    const auth = { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` };
+    const meta = await fetch(`https://graph.facebook.com/${this.version()}/${encodeURIComponent(mediaId)}`, { headers: auth, signal: AbortSignal.timeout(15_000) });
+    const info: any = await meta.json().catch(() => null);
+    if (!meta.ok || !info?.url) throw new Error(`No se pudo obtener el adjunto: ${info?.error?.message ?? `HTTP ${meta.status}`}`);
+    const file = await fetch(info.url, { headers: auth, signal: AbortSignal.timeout(60_000) });
+    if (!file.ok) throw new Error(`No se pudo descargar el adjunto: HTTP ${file.status}`);
+    return { data: Buffer.from(await file.arrayBuffer()), mime: info.mime_type || file.headers.get('content-type') || 'application/octet-stream' };
+  }
+
+  /** Deja el mensaje enviado en la conversación del cliente (bandeja). Nunca interrumpe el envío. */
+  async recordOutgoing(to: string, type: string, body: string, waMessageId?: string, sentById?: string) {
+    if (!TenantContext.companyId()) return;
+    try {
+      const customer = await this.findCustomerByPhone(to);
+      await this.prisma.whatsappMessage.create({
+        data: { phone: to, customerId: customer?.id ?? null, direction: 'OUT', type, body, waMessageId: waMessageId ?? null, status: 'SENT', sentById: sentById ?? null },
+      });
+    } catch (e: any) {
+      this.logger.warn(`No se pudo registrar el mensaje enviado en la bandeja: ${e?.message ?? e}`);
+    }
+  }
+
+  /** Cliente de la empresa del contexto con ese teléfono (comparando en formato internacional). */
+  async findCustomerByPhone(phone: string) {
+    const to = normalizeWhatsappPhone(phone);
+    if (!to) return null;
+    const candidates = await this.prisma.customer.findMany({
+      // Últimos 4 dígitos: tolera teléfonos guardados con guiones o espacios; luego se compara normalizado
+      where: { phone: { contains: to.slice(-4) } },
+      select: { id: true, fullName: true, code: true, phone: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return candidates.find((c) => normalizeWhatsappPhone(c.phone) === to) ?? null;
+  }
+
+  private version() {
+    return process.env.WHATSAPP_API_VERSION || 'v24.0';
   }
 
   /** Sube un archivo a WhatsApp y devuelve el id del medio (válido unos 30 días). */

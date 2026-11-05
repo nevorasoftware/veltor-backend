@@ -13,7 +13,8 @@ async function bootstrap() {
   app.set('trust proxy', 1);
 
   // Límite de carga para expedientes documentales y fotos de alta resolución (hasta 50MB)
-  app.use(json({ limit: '50mb' }));
+  // rawBody: el webhook de WhatsApp valida la firma de Meta sobre el cuerpo exacto recibido
+  app.use(json({ limit: '50mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
   app.use(urlencoded({ limit: '50mb', extended: true }));
 
   // Seguridad: Cabeceras HTTP con Helmet

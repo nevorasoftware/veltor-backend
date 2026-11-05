@@ -261,6 +261,7 @@ model Company {
   systemSettings           SystemSetting[]
   expenses                 Expense[]
   customerInvites          CustomerInvite[]
+  whatsappMessages         WhatsappMessage[]
 
   @@index([domains], type: Gin)
   @@map("companies")
@@ -334,12 +335,13 @@ model Customer {
   status           CustomerStatus @default(PROSPECT)
   internalNotes    String?        @db.Text
 
-  user            User?
-  documents       CustomerDocument[]
-  applications    FinancingApplication[]
-  loans           Loan[]
-  collectionCases CollectionCase[]
-  invites         CustomerInvite[]
+  user             User?
+  documents        CustomerDocument[]
+  applications     FinancingApplication[]
+  loans            Loan[]
+  collectionCases  CollectionCase[]
+  invites          CustomerInvite[]
+  whatsappMessages WhatsappMessage[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1001,4 +1003,45 @@ model Expense {
   @@index([status])
   @@index([companyId])
   @@map("expenses")
+}
+
+/// Mensajes de WhatsApp de la conversación con cada cliente: los que el cliente escribe al número de la
+/// plataforma (webhook de Meta) y las respuestas/plantillas que se le envían.
+model WhatsappMessage {
+  id          String    @id @default(uuid())
+  /// Empresa propietaria. La extensión de Prisma lo inyecta; el default de BD es solo una red de seguridad.
+  companyId   String    @default(dbgenerated("current_setting('app.company_id'::text, true)"))
+  company     Company   @relation(fields: [companyId], references: [id])
+  /// Cliente reconocido por su teléfono (null = número desconocido)
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// Teléfono del cliente en formato internacional sin + (50377336035): agrupa la conversación
+  phone       String
+  /// Nombre de perfil de WhatsApp del remitente
+  profileName String?
+  /// IN = lo escribió el cliente; OUT = enviado desde VELTOR
+  direction   String
+  /// text, image, document, audio, video, sticker, location, contacts, button, interactive, template, reaction, unsupported
+  type        String
+  body        String?   @db.Text
+  mediaId     String?
+  mediaMime   String?
+  mediaName   String?
+  /// Documento del expediente donde se archivó el adjunto (Drive)
+  documentId  String?
+  /// Id del mensaje en WhatsApp (wamid…), único: el webhook puede reenviar el mismo evento
+  waMessageId String?   @unique
+  /// OUT: SENT, DELIVERED, READ, FAILED. IN: RECEIVED
+  status      String    @default("RECEIVED")
+  error       String?
+  /// IN: cuándo lo leyó alguien del personal en el panel
+  readAt      DateTime?
+  sentById    String?
+  /// Hora del mensaje según WhatsApp
+  timestamp   DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId, phone, timestamp])
+  @@index([companyId, direction, readAt])
+  @@map("whatsapp_messages")
 }

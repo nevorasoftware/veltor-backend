@@ -18,6 +18,7 @@ import {
   leadReceivedMail,
   leadStaffAlertMail,
   customerRegisteredStaffMail,
+  whatsappReceivedStaffMail,
   loanApprovedMail,
   loanApprovedStaffMail,
   paymentRegisteredMail,
@@ -91,6 +92,7 @@ export class NotificationsService implements OnModuleInit {
     this.events.on('loan.activated', ({ loanId, silent }) => (silent ? undefined : this.notifyLoanActivated(loanId)));
     this.events.on('payment.registered', ({ paymentId, silent }) => (silent ? undefined : this.notifyPaymentRegistered(paymentId)));
     this.events.on('customer.registered', ({ customerId }) => this.notifyCustomerRegistered(customerId));
+    this.events.on('whatsapp.received', ({ messageId }) => this.notifyWhatsappReceived(messageId));
   }
 
   /** Aviso a administración (ADMIN activos + lista de personal) cuando un cliente completa su registro por enlace. */
@@ -117,6 +119,24 @@ export class NotificationsService implements OnModuleInit {
     await this.notifyAdminWhatsapp('cliente registrado en el portal', `${c.fullName} (${c.code})`, `DUI ${c.dui ?? '-'} · ${c.email ?? 'sin correo'}`);
     for (const to of recipients) {
       await this.mail.send({ to, template: 'customer.registered.staff', dedupeKey: `customer:${c.id}:registered:${to}`, ...content });
+    }
+  }
+
+  /** Aviso a administración (ADMIN activos + lista de personal, por correo y WhatsApp) de un mensaje de un cliente. */
+  async notifyWhatsappReceived(messageId: string) {
+    const m = await this.prisma.whatsappMessage.findUnique({
+      where: { id: messageId },
+      select: { id: true, phone: true, type: true, body: true, profileName: true, timestamp: true, customer: { select: { fullName: true, code: true } } },
+    });
+    if (!m) return;
+    const who = m.customer ? `${m.customer.fullName} (${m.customer.code})` : m.profileName ? `${m.profileName} (no es cliente)` : 'Número desconocido';
+    const preview = (m.body?.trim() || (m.type === 'text' ? '' : `[${m.type}]`)).slice(0, 300) || '-';
+    const admins = await this.prisma.user.findMany({ where: { role: UserRole.ADMIN, isActive: true }, select: { email: true } });
+    const recipients = [...new Set([...admins.map((a) => a.email), ...(await this.settings.getStaffNotificationEmails())].map((e) => e.toLowerCase()))];
+    const content = whatsappReceivedStaffMail({ who, phone: `+${m.phone}`, preview, at: m.timestamp.toLocaleString('es-SV', { timeZone: 'America/El_Salvador' }) });
+    await this.notifyAdminWhatsapp('mensaje de WhatsApp recibido', who, preview.slice(0, 120));
+    for (const to of recipients) {
+      await this.mail.send({ to, template: 'whatsapp.received.staff', dedupeKey: `whatsapp:${m.id}:${to}`, ...content });
     }
   }
 
