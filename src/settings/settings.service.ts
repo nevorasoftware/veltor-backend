@@ -69,6 +69,9 @@ export class SettingsService {
     });
   }
 
+  /** Tope mínimo de la tasa mensual permitida (4 %): el rango del producto nunca queda por debajo */
+  static readonly MIN_RATE_CEILING = 0.04;
+
   async getPublicSettings() {
     const [setting, product] = await Promise.all([
       this.prisma.systemSetting.findUnique({ where: settingKey(RATE_KEY) }),
@@ -84,7 +87,7 @@ export class SettingsService {
       preferentialMonthlyRate: monthlyRate,
       preferentialAnnualRate: monthlyRate !== null ? Number((monthlyRate * 12).toFixed(4)) : null,
       minMonthlyRate: product ? Number(product.minMonthlyRate) : null,
-      maxMonthlyRate: product ? Number(product.maxMonthlyRate) : null,
+      maxMonthlyRate: product ? Math.max(Number(product.maxMonthlyRate), SettingsService.MIN_RATE_CEILING) : null,
       minDownPercent: product ? Number(product.minDownPercent) : null,
       minTermMonths: product?.minTermMonths ?? null,
       maxTermMonths: product?.maxTermMonths ?? null,
@@ -118,8 +121,9 @@ export class SettingsService {
       if (monthlyRate < Number(product.minMonthlyRate)) {
         await tx.financingProduct.updateMany({ where: { isActive: true }, data: { minMonthlyRate: monthlyRate } });
       }
-      if (monthlyRate > Number(product.maxMonthlyRate)) {
-        await tx.financingProduct.updateMany({ where: { isActive: true }, data: { maxMonthlyRate: monthlyRate } });
+      const ceiling = Math.max(monthlyRate, SettingsService.MIN_RATE_CEILING);
+      if (ceiling > Number(product.maxMonthlyRate)) {
+        await tx.financingProduct.updateMany({ where: { isActive: true }, data: { maxMonthlyRate: ceiling } });
       }
       return saved;
     });
@@ -142,14 +146,14 @@ export class SettingsService {
     ]);
     const get = (k: keyof typeof COLLECTION_KEYS) => rows.find((r) => r.key === COLLECTION_KEYS[k])?.value;
     const envDays = (process.env.PAYMENT_REMINDER_DAYS || '').split(',')[0]?.trim();
-    const paymentDay = toInt(get('defaultPaymentDay'), 0);
     const type = get('defaultLateFeeType') as LateFeeTypeValue | undefined;
 
     return {
       reminderDaysBefore: toInt(get('reminderDaysBefore') ?? envDays, 3),
       graceDays: product?.graceDays ?? 5,
       overdueReminderEveryDays: toInt(get('overdueReminderEveryDays'), 7),
-      defaultPaymentDay: paymentDay >= 1 && paymentDay <= 28 ? paymentDay : null,
+      // El día de pago ya no es un parámetro global: cada crédito vence el día del mes en que se apertura
+      defaultPaymentDay: null,
       defaultLateFeeType: type && LATE_FEE_TYPES.includes(type) ? type : 'PER_DAY',
       lateFeePerDayAmount: toNum(get('lateFeePerDayAmount'), 5),
       lateFeePerInstallmentAmount: toNum(get('lateFeePerInstallmentAmount'), 20),

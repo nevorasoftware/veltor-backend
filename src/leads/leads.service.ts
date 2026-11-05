@@ -547,7 +547,7 @@ export class LeadsService {
         ? explicitDay <= 28 || initialLoad
           ? explicitDay
           : null
-        : dto.paymentDay ?? collection.defaultPaymentDay ?? null;
+        : dto.paymentDay ?? null; // sin día indicado: el día de apertura (se completa abajo con la fecha de desembolso)
     const lateFeeType = dto.lateFeeType ?? collection.defaultLateFeeType;
     const lateFeeAmount =
       lateFeeType === LateFeeType.NONE
@@ -564,6 +564,8 @@ export class LeadsService {
       dto.disbursementDate ?? (dto.firstPaymentDate && initialLoad ? addMonths(dto.firstPaymentDate, -1) : todayInTz());
     const firstDueDate =
       dto.firstPaymentDate ?? (paymentDay ? firstDueDateForDay(disbursementDate, paymentDay) : addMonths(disbursementDate, 1));
+    // Día de pago del crédito: el indicado, o el mismo día del mes en que se apertura (29-31 vencen a fin de mes en meses cortos)
+    const loanPaymentDay = paymentDay ?? Number(firstDueDate.slice(8, 10));
     if (firstDueDate <= disbursementDate) {
       throw new BadRequestException('La primera cuota debe ser posterior a la fecha de desembolso.');
     }
@@ -692,7 +694,7 @@ export class LeadsService {
               lateRateMonthly: null,
               lateFeeType,
               lateFeeAmount: lateFeeAmount?.toFixed(2) ?? null,
-              paymentDay,
+              paymentDay: loanPaymentDay,
               insuranceMonthly: insurance ? insurance.toFixed(2) : null,
               notificationsPaused: false,
               disbursementDate: new Date(disbursementDate),
