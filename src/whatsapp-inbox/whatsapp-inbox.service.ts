@@ -46,6 +46,29 @@ export function describeIncoming(m: any): { body: string | null; mediaId?: strin
   }
 }
 
+/** 50378223304 → "+503 7822 3304" (otros países: "+<número>") */
+export function displayPhone(raw: string | null | undefined): string | null {
+  const p = normalizeWhatsappPhone(raw);
+  if (!p) return null;
+  return p.startsWith('503') && p.length === 11 ? `+503 ${p.slice(3, 7)} ${p.slice(7)}` : `+${p}`;
+}
+
+/**
+ * Acuse automático. Aclara que este número es solo para notificaciones y comprobantes, y remite las dudas
+ * al WhatsApp de atención de la empresa (WhatsApp de pagos o, si no hay, teléfono de contacto).
+ */
+export function autoReplyText(fullName: string | null, company: { name: string; paymentsWhatsapp?: string | null; contactPhone?: string | null }): string {
+  const hello = fullName ? `Hola ${fullName.split(' ')[0]}` : 'Hola';
+  const first = (v?: string | null) => (v ?? '').split(/[,;/]+/).map((s) => s.trim()).find(Boolean) ?? null;
+  const contact = displayPhone(first(company.paymentsWhatsapp)) ?? displayPhone(first(company.contactPhone));
+  return [
+    `${hello}, gracias por escribir a ${company.name}. Recibimos su mensaje y le responderemos a la brevedad.`,
+    contact
+      ? `Este número es para la gestión de notificaciones y el envío de comprobantes. Si tiene dudas puntuales, puede escribirnos al ${contact}.`
+      : 'Este número es para la gestión de notificaciones y el envío de comprobantes.',
+  ].join('\n\n');
+}
+
 /**
  * Bandeja de WhatsApp: recibe por webhook lo que los clientes escriben al número de la plataforma, lo
  * asigna a la empresa del cliente (por su teléfono), archiva los adjuntos en su expediente, avisa a
@@ -142,7 +165,7 @@ export class WhatsappInboxService {
 
       const quiet = !previous || +at - +previous.timestamp > NOTIFY_QUIET_MS;
       if (quiet) this.events.emit('whatsapp.received', { messageId: msg.id });
-      if (!previous || +at - +previous.timestamp > REPLY_WINDOW_MS) await this.autoReply(phone, owner.company.name, owner.customerId);
+      if (!previous || +at - +previous.timestamp > REPLY_WINDOW_MS) await this.autoReply(phone, owner.company, owner.customerId);
     }, toCompanyInfo(owner.company as any));
   }
 
@@ -165,11 +188,10 @@ export class WhatsappInboxService {
   }
 
   /** Acuse automático al primer mensaje de una conversación (una vez cada 24 h). WHATSAPP_AUTO_REPLY=off lo apaga. */
-  private async autoReply(phone: string, companyName: string, customerId: string | null) {
+  private async autoReply(phone: string, company: { name: string; paymentsWhatsapp?: string | null; contactPhone?: string | null }, customerId: string | null) {
     if ((process.env.WHATSAPP_AUTO_REPLY ?? 'on').toLowerCase() === 'off') return;
     const customer = customerId ? await this.prisma.customer.findUnique({ where: { id: customerId }, select: { fullName: true } }) : null;
-    const hello = customer ? `Hola ${customer.fullName.split(' ')[0]}` : 'Hola';
-    const text = `${hello}, gracias por escribir a ${companyName}. Recibimos su mensaje y le responderemos a la brevedad.`;
+    const text = autoReplyText(customer?.fullName ?? null, company);
     const r = await this.whatsapp.sendText(phone, text);
     if (r.status === 'SENT') await this.whatsapp.recordOutgoing(phone, 'auto', text, r.messageId);
   }

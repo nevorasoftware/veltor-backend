@@ -1,6 +1,6 @@
 import { createHmac } from 'crypto';
 import { TenantContext } from '../tenant/tenant-context';
-import { WhatsappInboxService, describeIncoming } from './whatsapp-inbox.service';
+import { WhatsappInboxService, autoReplyText, describeIncoming } from './whatsapp-inbox.service';
 
 const companyA = { id: 'A', slug: 'veltor', name: 'Veltor', isDefault: true, isActive: true };
 const companyB = { id: 'B', slug: 'otra', name: 'Otra', isDefault: false, isActive: true };
@@ -62,6 +62,16 @@ describe('WhatsappInboxService', () => {
     expect(svc.verifySignature(raw, undefined)).toBe(false);
     delete process.env.WHATSAPP_APP_SECRET;
     expect(svc.verifySignature(raw, sig)).toBe(false); // sin secreto configurado se rechaza
+  });
+
+  it('la respuesta automática remite las dudas al WhatsApp de atención de la empresa', () => {
+    const t = autoReplyText('Jonathan Misael Jirón', { name: 'VELTOR', paymentsWhatsapp: '78223304', contactPhone: null });
+    expect(t).toBe(
+      'Hola Jonathan, gracias por escribir a VELTOR. Recibimos su mensaje y le responderemos a la brevedad.\n\n' +
+        'Este número es para la gestión de notificaciones y el envío de comprobantes. Si tiene dudas puntuales, puede escribirnos al +503 7822 3304.',
+    );
+    expect(autoReplyText(null, { name: 'Otra', paymentsWhatsapp: null, contactPhone: '2222-1111' })).toContain('escribirnos al +503 2222 1111.');
+    expect(autoReplyText(null, { name: 'Otra' })).not.toContain('escribirnos');
   });
 
   it('interpreta los tipos de mensaje', () => {
