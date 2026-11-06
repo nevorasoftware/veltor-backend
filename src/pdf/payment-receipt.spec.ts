@@ -14,8 +14,10 @@ describe('PdfService.generatePaymentReceiptPdf', () => {
       code: 'PAG-2026-0150',
       effectiveDate: new Date('2026-11-02T00:00:00Z'),
       registeredAt: new Date('2026-11-04T10:00:00Z'),
-      amountReceived: D('342.12'),
-      amountApplied: D('342.12'),
+      amountReceived: D('306.12'),
+      amountApplied: D('306.12'),
+      // Seguro pagado aparte: no forma parte del crédito, solo se informa en el comprobante
+      insuranceAmount: D('36.00'),
       kind: 'INSTALLMENT',
       paymentMethod: 'BANK_TRANSFER',
       referenceNumber: 'TRX-778899',
@@ -27,7 +29,7 @@ describe('PdfService.generatePaymentReceiptPdf', () => {
     },
     principalBalanceAfter: '5873.88',
     paidOff: false,
-    next: { number: 2, dueDate: '2026-12-02', totalPayment: '342.12' },
+    next: { number: 2, dueDate: '2026-12-02', payment: '306.12', totalPayment: '306.12' },
   };
   const svc = new PdfService(
     { getPaymentReceipt: jest.fn().mockResolvedValue(receipt) } as any,

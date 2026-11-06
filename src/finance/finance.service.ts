@@ -64,12 +64,15 @@ export class FinanceService {
         loan.lateFeeType !== 'NONE' && loan.lateFeeAmount
           ? { type: loan.lateFeeType, amount: loan.lateFeeAmount.toFixed(2) }
           : null,
-      insuranceMonthly: loan.insuranceMonthly ? loan.insuranceMonthly.toFixed(2) : null,
+      // El seguro no forma parte del crédito: se cobra aparte en cada pago (PaymentTransaction.insuranceAmount)
+      // y no se refleja en la tabla de amortización ni en los saldos.
+      insuranceMonthly: null,
     };
   }
 
   private toEvents(payments: PaymentTransaction[]): LoanEvent[] {
-    return payments.map((p) => ({
+    // Un pago solo de seguro (monto al crédito 0) no es un evento del crédito
+    return payments.filter((p) => p.amountReceived.gt(0)).map((p) => ({
       type: 'PAYMENT',
       id: p.id,
       seq: p.sequenceNumber,
@@ -129,12 +132,67 @@ export class FinanceService {
     }));
   }
 
-  /** Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. */
+  /** Seguro pagado por número de cuota (asignaciones INSURANCE de los pagos vigentes). Informativo: no es parte del crédito. */
+  private insurancePaidByInstallment(payments: { allocations: { concept: string; installmentNumber: number | null; amount: Prisma.Decimal }[] }[]) {
+    const out = new Map<number, Decimal>();
+    for (const p of payments) {
+      for (const a of p.allocations) {
+        if (a.concept !== 'INSURANCE' || !a.installmentNumber) continue;
+        out.set(a.installmentNumber, (out.get(a.installmentNumber) ?? new Decimal(0)).plus(a.amount.toString()));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Reparte el seguro pagado entre las cuotas que cubrió el pago: cada cuota hasta el seguro mensual del crédito
+   * (descontando lo ya pagado de seguro en ella) y el resto a la última. Si el pago no cubrió cuotas (solo seguro),
+   * va a la primera cuota con seguro pendiente. Solo es detalle informativo: no se aplica al crédito.
+   */
+  private allocateInsurance(
+    loan: Loan & { payments: { allocations: { concept: string; installmentNumber: number | null; amount: Prisma.Decimal }[] }[] },
+    creditAllocations: { installmentNumber: number | null }[],
+    insurance: Decimal,
+    installmentNumbers: number[],
+  ) {
+    type InsuranceAllocation = { concept: 'INSURANCE'; installmentNumber: number | null; amount: string };
+    if (!insurance.gt(0)) return [] as InsuranceAllocation[];
+    const monthly = new Decimal(loan.insuranceMonthly?.toString() ?? '0');
+    const paid = this.insurancePaidByInstallment(loan.payments);
+    const pendingOf = (n: number) => Decimal.max(monthly.minus(paid.get(n) ?? 0), 0);
+    let covered = [...new Set(creditAllocations.map((a) => a.installmentNumber).filter((n): n is number => !!n))].sort((a, b) => a - b);
+    if (!covered.length) {
+      const first = monthly.gt(0) ? installmentNumbers.find((n) => pendingOf(n).gt(0)) : undefined;
+      covered = first ? [first] : [];
+    }
+    if (!covered.length) return [{ concept: 'INSURANCE', installmentNumber: null, amount: insurance.toFixed(2) }] as InsuranceAllocation[];
+    const out: InsuranceAllocation[] = [];
+    let left = insurance;
+    covered.forEach((n, idx) => {
+      const isLast = idx === covered.length - 1;
+      const take = isLast ? left : Decimal.min(left, monthly.gt(0) ? pendingOf(n) : left);
+      if (take.gt(0)) out.push({ concept: 'INSURANCE', installmentNumber: n, amount: take.toFixed(2) });
+      left = left.minus(take);
+    });
+    return out;
+  }
+
+  /**
+   * Obtiene el snapshot recalculado y reproducible de un crédito a una fecha. Cada cuota lleva además
+   * `insurancePaid`: el seguro pagado aparte para esa cuota (informativo, no forma parte de la cuota ni del capital).
+   */
   async getLoanLedgerSnapshot(loanId: string, asOfDate?: string, where: Prisma.LoanWhereInput = {}) {
     this.validateDate(asOfDate, 'La fecha de corte');
     const loan = await this.findLoan(loanId, where);
     const contract = this.buildContract(loan);
-    const snapshot = LoanLedger.replay(contract, this.toEvents(loan.payments), asOfDate || todayInTz());
+    const raw = LoanLedger.replay(contract, this.toEvents(loan.payments), asOfDate || todayInTz());
+    const insurance = this.insurancePaidByInstallment(loan.payments);
+    const withInsurance = <T extends { number: number }>(i: T) => ({ ...i, insurancePaid: (insurance.get(i.number) ?? new Decimal(0)).toFixed(2) });
+    const snapshot = {
+      ...raw,
+      current: { ...raw.current, installments: raw.current.installments.map(withInsurance) },
+      versions: raw.versions.map((v) => ({ ...v, installments: v.installments.map(withInsurance) })),
+    };
     return { loan, contract, snapshot };
   }
 
@@ -175,6 +233,8 @@ export class FinanceService {
     registeredById: string;
     /** Pago histórico de carga inicial: sin correos */
     initialLoad?: boolean;
+    /** Seguro pagado junto con este pago: no se aplica al crédito, solo se informa en el comprobante */
+    insuranceAmount?: string;
   }) {
     // 1. Verificación de Idempotencia
     const existing = await this.prisma.paymentTransaction.findUnique({
@@ -193,7 +253,14 @@ export class FinanceService {
     if (cmp(dto.effectiveDate, todayInTz()) > 0) {
       throw new BadRequestException('La fecha efectiva del pago no puede ser futura.');
     }
-    if (!D(dto.amount).gt(0)) throw new BadRequestException('El monto del pago debe ser mayor a cero.');
+    const insuranceAmount = dto.insuranceAmount ? D(dto.insuranceAmount) : D(0);
+    if (!insuranceAmount.isFinite() || insuranceAmount.lt(0)) throw new BadRequestException('El monto del seguro no puede ser negativo.');
+    const amount = D(dto.amount);
+    if (!amount.isFinite() || amount.lt(0)) throw new BadRequestException('El monto del pago no puede ser negativo.');
+    // Se admite un pago solo de seguro (monto al crédito 0) en pagos de cuota
+    if (!amount.gt(0) && !(dto.kind === 'INSTALLMENT' && insuranceAmount.gt(0))) {
+      throw new BadRequestException('El monto del pago debe ser mayor a cero.');
+    }
     if (dto.kind === 'PRINCIPAL_PREPAYMENT' && !dto.policy) {
       throw new BadRequestException('Indique si el abono a capital reduce el plazo o la cuota.');
     }
@@ -220,15 +287,25 @@ export class FinanceService {
     });
     const nextSeq = (maxSeq._max.sequenceNumber ?? 0) + 1;
 
-    const result = ledger.apply({
-      type: 'PAYMENT',
-      id: `pending-${nextSeq}`,
-      seq: nextSeq,
-      date: dto.effectiveDate,
-      amount: D(dto.amount).toFixed(2),
-      kind: dto.kind,
-      policy: dto.policy,
-    });
+    const result = amount.gt(0)
+      ? ledger.apply({
+          type: 'PAYMENT',
+          id: `pending-${nextSeq}`,
+          seq: nextSeq,
+          date: dto.effectiveDate,
+          amount: amount.toFixed(2),
+          kind: dto.kind,
+          policy: dto.policy,
+        })
+      : { applied: '0.00', unapplied: '0.00', rescheduled: false, allocations: [] as { concept: any; installmentNumber: number | null; amount: string }[] };
+
+    // Seguro: detalle informativo ligado a las cuotas que cubrió el pago (no se aplica al crédito)
+    const insuranceAllocations = this.allocateInsurance(
+      loan as any,
+      result.allocations,
+      insuranceAmount,
+      ledger.snapshot(dto.effectiveDate).current.installments.map((i) => i.number),
+    );
 
     // 3. Persistir atómicamente
     const payment = await withUniqueRetry(() =>
@@ -244,8 +321,9 @@ export class FinanceService {
             loanId: loan.id,
             sequenceNumber: nextSeq,
             effectiveDate: new Date(dto.effectiveDate),
-            amountReceived: D(dto.amount).toFixed(2),
+            amountReceived: amount.toFixed(2),
             amountApplied: D(result.applied).toFixed(2),
+            insuranceAmount: insuranceAmount.toFixed(2),
             kind: dto.kind,
             policy: dto.policy,
             paymentMethod: dto.paymentMethod,
@@ -254,7 +332,7 @@ export class FinanceService {
             idempotencyKey: dto.idempotencyKey,
             registeredById: dto.registeredById,
             allocations: {
-              create: result.allocations.map((a) => ({
+              create: [...result.allocations, ...insuranceAllocations].map((a) => ({
                 concept: a.concept,
                 installmentNumber: a.installmentNumber,
                 amount: D(a.amount).toFixed(2),
@@ -409,7 +487,8 @@ export class FinanceService {
     const toPay = schedule.installments.slice(0, markPaidThrough).map((i) => ({
       number: i.number,
       dueDate: i.dueDate,
-      amount: D(i.payment.toFixed(2)).plus(insurance ? insurance.toFixed(2) : '0').toFixed(2),
+      amount: i.payment.toFixed(2),
+      insurance: insurance ? insurance.toFixed(2) : '0.00',
     }));
     const futureDue = toPay.find((p) => cmp(p.dueDate, today) > 0);
     if (futureDue) {
@@ -505,7 +584,7 @@ export class FinanceService {
           scheduledInterest: inst.interest.toFixed(2),
           scheduledPayment: inst.payment.toFixed(2),
           closingBalance: inst.closingBalance.toFixed(2),
-          scheduledInsurance: insurance ? insurance.toFixed(2) : '0',
+          scheduledInsurance: '0',
           status: InstallmentStatus.PENDING,
         })),
       });
@@ -527,6 +606,7 @@ export class FinanceService {
       const r = await this.registerPayment({
         loanId: loan.id,
         amount: p.amount,
+        insuranceAmount: p.insurance,
         effectiveDate: p.dueDate,
         kind: 'INSTALLMENT',
         paymentMethod: 'OTHER',

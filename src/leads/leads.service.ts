@@ -299,7 +299,7 @@ export class ConvertLeadToLoanDto {
   @IsOptional()
   principal?: number;
 
-  /** Seguro mensual que se suma a cada cuota como concepto aparte (USD). */
+  /** Seguro mensual (USD) que se sugiere al registrar cada pago. No forma parte del crédito ni de su tabla de amortización. */
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
@@ -728,7 +728,7 @@ export class LeadsService {
               scheduledInterest: inst.interest.toFixed(2),
               scheduledPayment: inst.payment.toFixed(2),
               closingBalance: inst.closingBalance.toFixed(2),
-              scheduledInsurance: insurance ? insurance.toFixed(2) : '0',
+              scheduledInsurance: '0', // el seguro no forma parte de la cuota
               status: InstallmentStatus.PENDING,
             })),
           });

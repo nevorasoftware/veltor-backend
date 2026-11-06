@@ -52,6 +52,11 @@ export class RegisterPaymentDto {
   @IsNumberString()
   amount!: string;
 
+  /** Seguro pagado junto con el pago (opcional). No se aplica al crédito; solo se informa en el comprobante. */
+  @IsNumberString()
+  @IsOptional()
+  insuranceAmount?: string;
+
   @IsString()
   @IsNotEmpty()
   effectiveDate!: string;

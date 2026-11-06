@@ -89,7 +89,7 @@ export class PdfService {
       scheduledPrincipal: inst.principal,
       scheduledInterest: inst.interest,
       scheduledPayment: inst.payment,
-      insurance: inst.insurance,
+      insurance: inst.insurancePaid,
       totalPayment: inst.totalPayment,
       closingBalance: inst.closingBalance,
       status: inst.status,
@@ -131,14 +131,14 @@ export class PdfService {
       doc.text(`Monto Financiado: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 22);
       doc.text(`Tasa Mensual: ${(Number(loan.monthlyRate) * 100).toFixed(2)}%`, 310, boxTop + 34);
       doc.text(
-        `Plazo: ${loan.termCount} meses (${loan.frequency})${Number(loan.insuranceMonthly ?? 0) > 0 ? ` · Seguro: ${formatMoney(loan.insuranceMonthly)}/mes` : ''}`,
+        `Plazo: ${loan.termCount} meses (${loan.frequency})`,
         310,
         boxTop + 46,
       );
       doc.text(`Base de Cálculo: ${loan.dayCount}`, 310, boxTop + 58);
 
-      // Columnas de la tabla: con seguro se agrega la columna "Seguro" y "Cuota Total" = cuota + seguro
-      const hasInsurance = Number(loan.insuranceMonthly ?? 0) > 0;
+      // Seguro: columna informativa con lo pagado aparte en cada cuota. No forma parte de la cuota ni del capital.
+      const hasInsurance = Number(loan.insuranceMonthly ?? 0) > 0 || installmentsToRender.some((i) => Number(i.insurance) > 0);
       type Col = { title: string; x: number; w: number; align: 'left' | 'center' | 'right'; bold?: boolean };
       const columns: Col[] = hasInsurance
         ? [
@@ -147,8 +147,8 @@ export class PdfService {
             { title: 'Saldo Inicial', x: 128, w: 72, align: 'right' },
             { title: 'Capital', x: 202, w: 66, align: 'right' },
             { title: 'Interés', x: 270, w: 62, align: 'right' },
-            { title: 'Seguro', x: 334, w: 58, align: 'right' },
-            { title: 'Cuota Total', x: 394, w: 82, align: 'right', bold: true },
+            { title: 'Cuota', x: 334, w: 70, align: 'right', bold: true },
+            { title: 'Seguro pagado', x: 406, w: 70, align: 'right' },
             { title: 'Saldo Final', x: 478, w: 92, align: 'right' },
           ]
         : [
@@ -202,8 +202,8 @@ export class PdfService {
           formatMoney(item.openingBalance),
           formatMoney(item.scheduledPrincipal),
           formatMoney(item.scheduledInterest),
-          ...(hasInsurance ? [formatMoney(item.insurance)] : []),
-          formatMoney(item.totalPayment),
+          formatMoney(item.scheduledPayment),
+          ...(hasInsurance ? [Number(item.insurance) > 0 ? formatMoney(item.insurance) : '-'] : []),
           formatMoney(item.closingBalance),
         ];
         columns.forEach((col, idx) => {
@@ -220,14 +220,14 @@ export class PdfService {
   }
 
   /**
-   * Comprobante de un pago: cuotas que cubrió con su desglose (capital, interés, seguro, mora), saldo de
-   * capital después del pago y siguiente cuota. `scope` restringe el crédito (portal del cliente).
+   * Comprobante de un pago: cuotas que cubrió con su desglose (capital, interés, mora), el seguro pagado
+   * aparte (no forma parte del crédito), saldo de capital después del pago y siguiente cuota. `scope` restringe el crédito (portal del cliente).
    */
   async generatePaymentReceiptPdf(loanId: string, paymentId: string, scope: Prisma.LoanWhereInput = {}): Promise<Buffer> {
     const { loan, payment, principalBalanceAfter, paidOff, next } = await this.financeService.getPaymentReceipt(loanId, paymentId, scope);
     const logo = await loadRasterLogo(this.prisma.unscoped);
     const CONCEPT: Record<string, string> = {
-      PRINCIPAL: 'Capital', INTEREST: 'Interés', ACCRUED_INTEREST: 'Interés devengado', INSURANCE: 'Seguro',
+      PRINCIPAL: 'Capital', INTEREST: 'Interés', ACCRUED_INTEREST: 'Interés devengado', INSURANCE: 'Seguro (aparte del crédito)',
       LATE_INTEREST: 'Mora', PREPAYMENT_PRINCIPAL: 'Abono a capital', SURPLUS: 'Saldo a favor',
     };
     const METHOD: Record<string, string> = {
@@ -267,7 +267,12 @@ export class PdfService {
       const top = 100;
       doc.roundedRect(36, top, 540, 62, 6).fillAndStroke('#F0FDFA', '#99F6E4');
       doc.font('Helvetica').fontSize(9).fillColor('#0F766E').text('MONTO RECIBIDO', 50, top + 12);
-      doc.font('Helvetica-Bold').fontSize(24).fillColor('#0F766E').text(formatMoney(payment.amountReceived), 50, top + 25);
+      const insurancePaid = Number(payment.insuranceAmount ?? 0);
+      doc.font('Helvetica-Bold').fontSize(24).fillColor('#0F766E').text(formatMoney(Number(payment.amountReceived) + insurancePaid), 50, top + 25);
+      if (insurancePaid > 0) {
+        doc.font('Helvetica').fontSize(8).fillColor('#0F766E')
+          .text(`Crédito ${formatMoney(payment.amountReceived)} + seguro ${formatMoney(insurancePaid)}`, 50, top + 49, { width: 260 });
+      }
       doc.font('Helvetica').fontSize(9).fillColor(graphite);
       doc.text(`Fecha de pago: ${effective}`, 320, top + 12, { width: 245, align: 'right' });
       doc.text(KIND[payment.kind] ?? payment.kind, 320, top + 27, { width: 245, align: 'right' });
@@ -320,9 +325,21 @@ export class PdfService {
       }
       doc.moveTo(36, y + 2).lineTo(576, y + 2).strokeColor(border).lineWidth(0.5).stroke();
       doc.font('Helvetica-Bold').fontSize(9).fillColor(graphite);
-      doc.text('Total aplicado', 200, y + 8, { width: 200 });
+      doc.text('Total aplicado al crédito', 200, y + 8, { width: 200 });
       doc.text(formatMoney(payment.amountApplied), 450, y + 8, { width: 116, align: 'right' });
-      y += 32;
+      y += 22;
+      // Seguro: se informa en el detalle pero no forma parte del crédito ni reduce el capital
+      if (insurancePaid > 0) {
+        doc.font('Helvetica').fontSize(9).fillColor(graphite);
+        doc.text('Seguro', 200, y + 2, { width: 200 });
+        doc.text(formatMoney(insurancePaid), 450, y + 2, { width: 116, align: 'right' });
+        doc.font('Helvetica-Bold').text('Total recibido', 200, y + 16, { width: 200 });
+        doc.text(formatMoney(Number(payment.amountReceived) + insurancePaid), 450, y + 16, { width: 116, align: 'right' });
+        doc.font('Helvetica').fontSize(7.5).fillColor(muted)
+          .text('El seguro no forma parte del crédito: no reduce el capital ni modifica la cuota.', 46, y + 32, { width: 520 });
+        y += 46;
+      }
+      y += 10;
 
       // Situación después del pago
       doc.rect(36, y, 540, 46).fillAndStroke(rowAlt, border);
@@ -330,7 +347,7 @@ export class PdfService {
       const nextText = paidOff
         ? 'Con este pago el crédito quedó cancelado en su totalidad.'
         : next
-        ? `Siguiente cuota: No. ${next.number}, vence el ${formatDate(new Date(`${next.dueDate}T12:00:00Z`))} por ${formatMoney(next.totalPayment)}.`
+        ? `Siguiente cuota: No. ${next.number}, vence el ${formatDate(new Date(`${next.dueDate}T12:00:00Z`))} por ${formatMoney(next.payment)}.`
         : '';
       doc.font('Helvetica').fontSize(8.5).fillColor(graphite).text(nextText, 46, y + 26);
 
@@ -383,9 +400,8 @@ export class PdfService {
       doc.text(`Monto Inicial: ${formatMoney(loan.originalPrincipal)}`, 310, boxTop + 24);
       doc.font('Helvetica-Bold').fillColor('#0F766E').text(`Saldo de Capital Actual: ${formatMoney(snapshot.principalBalance)}`, 310, boxTop + 38);
       doc.font('Helvetica').fillColor(colorGraphite).text(`Total Abonado a la Fecha: ${formatMoney(totalPaid)}`, 310, boxTop + 52);
-      const insuranceNote = nextPending && Number(nextPending.insurance) > 0 ? ` incl. seguro ${formatMoney(nextPending.insurance)}` : '';
       doc.text(
-        `Próxima Cuota: ${nextPending ? `${formatMoney(nextPending.totalPayment)}${insuranceNote} (${nextPending.dueDate})` : 'Crédito cancelado'}`,
+        `Próxima Cuota: ${nextPending ? `${formatMoney(nextPending.payment)} (${nextPending.dueDate})` : 'Crédito cancelado'}`,
         310,
         boxTop + 66,
       );
@@ -401,8 +417,9 @@ export class PdfService {
       doc.text('Fecha', 120, currentY + 6, { width: 70, align: 'center' });
       doc.text('Concepto / Tipo', 195, currentY + 6, { width: 110, align: 'left' });
       doc.text('Método', 310, currentY + 6, { width: 80, align: 'center' });
-      doc.text('Referencia', 395, currentY + 6, { width: 85, align: 'left' });
-      doc.text('Monto Aplicado', 485, currentY + 6, { width: 85, align: 'right' });
+      doc.text('Referencia', 395, currentY + 6, { width: 55, align: 'left' });
+      doc.text('Seguro', 452, currentY + 6, { width: 50, align: 'right' });
+      doc.text('Monto Aplicado', 505, currentY + 6, { width: 65, align: 'right' });
 
       currentY += 20;
       doc.font('Helvetica').fontSize(8);
@@ -422,8 +439,9 @@ export class PdfService {
           doc.text(new Date(p.effectiveDate).toISOString().split('T')[0], 120, currentY + 5, { width: 70, align: 'center' });
           doc.text(p.kind, 195, currentY + 5, { width: 110, align: 'left' });
           doc.text(p.paymentMethod, 310, currentY + 5, { width: 80, align: 'center' });
-          doc.text(p.referenceNumber || '-', 395, currentY + 5, { width: 85, align: 'left' });
-          doc.font('Helvetica-Bold').text(formatMoney(p.amountApplied), 485, currentY + 5, { width: 85, align: 'right' });
+          doc.text(p.referenceNumber || '-', 395, currentY + 5, { width: 55, align: 'left', lineBreak: false, ellipsis: true });
+          doc.text(Number(p.insuranceAmount) > 0 ? formatMoney(p.insuranceAmount) : '-', 452, currentY + 5, { width: 50, align: 'right' });
+          doc.font('Helvetica-Bold').text(formatMoney(p.amountApplied), 505, currentY + 5, { width: 65, align: 'right' });
           doc.font('Helvetica');
           currentY += 18;
         }

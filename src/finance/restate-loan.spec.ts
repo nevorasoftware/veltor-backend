@@ -58,7 +58,8 @@ describe('FinanceService.restateLoan (rehacer crédito)', () => {
     expect(r.after.lastDueDate).toBe('2027-08-26');
     expect(r.paymentsToReverse).toHaveLength(3);
     expect(r.paymentsToRegister).toHaveLength(38);
-    expect(r.paymentsToRegister[37]).toEqual({ number: 38, dueDate: '2026-10-26', amount: '305.65' });
+    // El seguro va aparte: la cuota al crédito es 257.26 y el seguro 48.39 se registra en el pago, fuera del crédito
+    expect(r.paymentsToRegister[37]).toEqual({ number: 38, dueDate: '2026-10-26', amount: '257.26', insurance: '48.39' });
     expect(f.reversals).toHaveLength(0);
     expect(f.audits).toHaveLength(0);
     expect(f.installments).toEqual([{ old: true }]);

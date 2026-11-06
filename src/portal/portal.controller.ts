@@ -83,6 +83,7 @@ export class PortalController {
         code: p.code,
         effectiveDate: p.effectiveDate,
         amountReceived: p.amountReceived,
+        insuranceAmount: p.insuranceAmount,
         kind: p.kind,
         paymentMethod: p.paymentMethod,
         allocations: p.allocations.map((a) => ({ concept: a.concept, amount: a.amount, installmentNumber: a.installmentNumber })),

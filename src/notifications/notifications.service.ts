@@ -288,7 +288,7 @@ export class NotificationsService implements OnModuleInit {
     await this.notifyAdminWhatsapp(
       `pago recibido ${payment.code}`,
       `${loan.customer.fullName} (${loan.code})`,
-      `${usd(payment.amountReceived.toString())} el ${d} · saldo de capital ${usd(String(snapshot.principalBalance))}`,
+      `${usd(payment.amountReceived.plus(payment.insuranceAmount).toString())}${payment.insuranceAmount.gt(0) ? ` (incl. seguro ${usd(payment.insuranceAmount.toString())})` : ""} el ${d} · saldo de capital ${usd(String(snapshot.principalBalance))}`,
       loan.id,
     );
 
@@ -301,7 +301,7 @@ export class NotificationsService implements OnModuleInit {
         fullName: loan.customer.fullName,
         loanCode: loan.code,
         paymentCode: payment.code,
-        amount: payment.amountReceived.toString(),
+        amount: payment.amountReceived.plus(payment.insuranceAmount).toString(),
         effectiveDate: payment.effectiveDate.toISOString(),
         principalBalance: snapshot.principalBalance,
         paidOff: snapshot.status === 'PAID_OFF',
@@ -346,11 +346,11 @@ export class NotificationsService implements OnModuleInit {
         fullName: loan.customer.fullName,
         loanCode: loan.code,
         paymentCode: payment.code,
-        amount: payment.amountReceived.toString(),
+        amount: payment.amountReceived.plus(payment.insuranceAmount).toString(),
         effectiveDate: payment.effectiveDate.toISOString(),
         principalBalance: principalBalanceAfter,
         paidOff,
-        next: next ? { number: next.number, dueDate: next.dueDate, amount: next.totalPayment } : null,
+        next: next ? { number: next.number, dueDate: next.dueDate, amount: next.payment } : null,
       });
       const r = await this.mail.send({
         to,
@@ -368,7 +368,7 @@ export class NotificationsService implements OnModuleInit {
       const r = await this.whatsapp.sendTemplate({
         phone: loan.customer.phone,
         template: 'comprobante_pago',
-        body: [loan.customer.fullName, TenantContext.company()?.name ?? '-', payment.code, Number(payment.amountReceived).toFixed(2), d, loan.code],
+        body: [loan.customer.fullName, TenantContext.company()?.name ?? '-', payment.code, payment.amountReceived.plus(payment.insuranceAmount).toFixed(2), d, loan.code],
         document: { data: pdf, filename },
         loanId: loan.id,
       });
